@@ -10,8 +10,8 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
-.env
-.env.local
+# .env
+# .env.local
 apps/api/.env
 apps/worker/.env
 apps/web/.env.local
