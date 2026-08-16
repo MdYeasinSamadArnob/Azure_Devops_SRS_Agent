@@ -1,0 +1,14 @@
+# Production override — builds and runs the frontend's optimized, minimal
+# `next build` output instead of the dev server. Everything else (api,
+# workers, postgres, redis, minio) has no dev/prod distinction: uvicorn
+# already runs without --reload and the Celery workers run the same either
+# way, so only `web` needs overriding here.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+services:
+  web:
+    build:
+      target: prod
+    environment:
+      NODE_ENV: production

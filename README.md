@@ -33,6 +33,8 @@ templates/           Example .docx template(s) used as the base for generated do
 
 Data flow: **Azure DevOps → import pipeline → Postgres (draft snapshot) → user curation → sealed snapshot → generate pipeline → DOCX/PDF in MinIO**. Source attachments and generated documents are both content-addressed objects in MinIO; a "reselect & regenerate" forks a new snapshot and copies assets forward via a server-side MinIO copy — it never re-downloads from Azure DevOps.
 
+See **[docs/architecture.md](docs/architecture.md)** for C4 Context/Container diagrams and exactly what the LLM does (and doesn't do) in the pipeline.
+
 ## Tech stack
 
 - **Frontend**: Next.js, React, TypeScript, Tailwind
@@ -77,6 +79,17 @@ Every service also runs the same way if you're working on it directly — e.g. a
 ```bash
 docker compose build api && docker compose up -d --no-deps api && docker compose logs -f api
 ```
+
+### Production mode
+
+`docker compose up` always runs the frontend's `next dev` server — there's no dev/prod distinction for the API or workers (`uvicorn` already runs without `--reload`, and the Celery workers run the same either way), so only `web` needs a separate mode. Run everything with the frontend's optimized production build instead:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build   # start in production mode
+docker compose -f docker-compose.yml -f docker-compose.prod.yml down             # stop
+```
+
+This builds `apps/web`'s `prod` Dockerfile target — `next build`'s minimal standalone output (`node server.js`), not the dev server — on the same ports as above. Switch back to dev mode with a plain `docker compose up -d --build` (`docker compose down` stops either mode the same way, since it's the same set of container names either way).
 
 ### Monorepo commands (Turborepo)
 

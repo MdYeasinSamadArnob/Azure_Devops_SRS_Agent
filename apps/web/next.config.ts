@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Minimal, self-contained production server bundle (.next/standalone) —
+  // only the node_modules subset actually needed at runtime gets traced in,
+  // instead of shipping the full deps tree. Used by the Dockerfile's `prod`
+  // build target; has no effect on `next dev`.
+  output: "standalone",
   // Next.js's dev server only serves its own JS chunks (/_next/static/...)
   // to origins it recognizes, as a CSRF-hardening measure — accessing the
   // app via anything other than localhost (a LAN IP, a hostname) gets a
