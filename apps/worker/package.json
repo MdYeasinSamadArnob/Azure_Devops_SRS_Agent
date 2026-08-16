@@ -1,0 +1,8 @@
+{
+  "name": "@srs-agent/worker",
+  "private": true,
+  "scripts": {
+    "lint": "docker compose -f ../../docker-compose.yml run --rm worker-default ruff check .",
+    "test": "docker compose -f ../../docker-compose.yml run --rm worker-default pytest tests"
+  }
+}

@@ -1,0 +1,41 @@
+node_modules/
+.next/
+dist/
+build/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+.env
+.env.local
+apps/api/.env
+apps/worker/.env
+apps/web/.env.local
+.DS_Store
+*.log
+pgdata/
+minio_data/
+redis_data/
+.coverage
+htmlcov/
+
+# Turborepo / npm workspaces
+.turbo/
+node_modules/
+npm-debug.log*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Anything under scratch/ is local-only working output, never committed
+scratch/
+
+# Claude Code session-local state (lock files, not project content)
+.claude/
+

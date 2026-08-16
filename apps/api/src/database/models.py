@@ -1,0 +1,17 @@
+from srs_core.db.models import (  # noqa: F401
+    Asset,
+    AzureConnection,
+    GeneratedDocument,
+    GenerationJob,
+    ImportJob,
+    JobEvent,
+    OrgBrandingSettings,
+    SnapshotRelation,
+    SnapshotWorkItem,
+    SourceSnapshot,
+    SrsProject,
+    SrsSelection,
+    Tenant,
+    User,
+    UserSession,
+)

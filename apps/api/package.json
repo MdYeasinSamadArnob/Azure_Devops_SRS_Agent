@@ -1,0 +1,9 @@
+{
+  "name": "@srs-agent/api",
+  "private": true,
+  "scripts": {
+    "lint": "docker compose -f ../../docker-compose.yml run --rm api ruff check .",
+    "typecheck": "docker compose -f ../../docker-compose.yml run --rm api mypy src",
+    "test": "echo \"no apps/api tests yet — contributions welcome, see CONTRIBUTING.md\" && exit 0"
+  }
+}

@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "srs-core"
+version = "0.1.0"
+description = "Shared code for the SRS Agent API and worker: Azure DevOps client, MinIO wrapper, crypto helpers, shared enums"
+authors = []
+packages = [{ include = "srs_core" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+boto3 = "^1.34"
+httpx = "^0.27"
+tenacity = "^8.2"
+cryptography = "^42.0"
+pydantic = "^2.7"
+litellm = "^1.44"
+bcrypt = "^4.1"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

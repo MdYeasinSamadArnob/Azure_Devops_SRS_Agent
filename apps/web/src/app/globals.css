@@ -1,0 +1,233 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* ── Primitives — "Ink & Signal": warm paper + a confident signal-orange accent ── */
+  --paper-50: #faf9f6;
+  --paper-100: #f3f1ea;
+  --paper-200: #e7e2d9;
+  --paper-300: #d6cfc0;
+  --paper-500: #8a8171;
+  --paper-700: #4a4436;
+  --paper-800: #2c2820;
+  --paper-900: #17140f;
+  --paper-950: #0e0c08;
+
+  --signal-400: #ff8259;
+  --signal-500: #e8491f;
+  --signal-600: #c93c16;
+  --signal-700: #a52f10;
+
+  --success-500: #2f7d4f;
+  --warning-500: #b8791a;
+  --error-500: #c13b2e;
+  --info-500: #2563a8;
+
+  /* ── Semantic tokens (light) ── */
+  --color-surface: var(--paper-50);
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: var(--paper-100);
+  --color-ink: var(--paper-900);
+  --color-ink-muted: var(--paper-700);
+  --color-ink-faint: var(--paper-500);
+  --color-line: var(--paper-200);
+  --color-line-strong: var(--paper-300);
+  --color-accent: var(--signal-500);
+  --color-accent-hover: var(--signal-600);
+  --color-accent-ink: #ffffff;
+  --color-focus-ring: var(--signal-500);
+  --color-success: var(--success-500);
+  --color-warning: var(--warning-500);
+  --color-error: var(--error-500);
+  --color-info: var(--info-500);
+
+  --shadow-color: 30 25 15;
+  --shadow-sm: 0 1px 2px 0 rgb(var(--shadow-color) / 0.06);
+  --shadow-md: 0 4px 10px -2px rgb(var(--shadow-color) / 0.08), 0 2px 4px -2px rgb(var(--shadow-color) / 0.06);
+  --shadow-lg: 0 16px 32px -8px rgb(var(--shadow-color) / 0.14), 0 4px 8px -4px rgb(var(--shadow-color) / 0.08);
+
+  color-scheme: light;
+}
+
+.dark {
+  --color-surface: var(--paper-950);
+  --color-surface-raised: var(--paper-900);
+  --color-surface-sunken: #0a0906;
+  --color-ink: var(--paper-50);
+  --color-ink-muted: #c9c1af;
+  --color-ink-faint: #8a8171;
+  --color-line: var(--paper-800);
+  --color-line-strong: #3a352a;
+  --color-accent: var(--signal-400);
+  --color-accent-hover: var(--signal-500);
+  --color-accent-ink: #1a0d05;
+  --color-focus-ring: var(--signal-400);
+
+  --shadow-color: 0 0 0;
+  --shadow-sm: 0 1px 2px 0 rgb(var(--shadow-color) / 0.3);
+  --shadow-md: 0 4px 10px -2px rgb(var(--shadow-color) / 0.4);
+  --shadow-lg: 0 16px 32px -8px rgb(var(--shadow-color) / 0.5);
+
+  color-scheme: dark;
+}
+
+/* ── Accent axis — swaps ONLY the accent trio, independent of light/dark.
+   "signal" (the bare :root/.dark above) stays the default; these are
+   opt-in alternates picked from /settings/appearance. Each needs its own
+   light + dark pairing so contrast against accent-ink holds in both. ── */
+[data-accent="azure"] {
+  --color-accent: #2563a8;
+  --color-accent-hover: #1d4d85;
+  --color-accent-ink: #ffffff;
+  --color-focus-ring: #2563a8;
+}
+.dark[data-accent="azure"] {
+  --color-accent: #6ea8dc;
+  --color-accent-hover: #8fbfe6;
+  --color-accent-ink: #0a1929;
+  --color-focus-ring: #6ea8dc;
+}
+
+[data-accent="forest"] {
+  --color-accent: #2f7d4f;
+  --color-accent-hover: #256640;
+  --color-accent-ink: #ffffff;
+  --color-focus-ring: #2f7d4f;
+}
+.dark[data-accent="forest"] {
+  --color-accent: #5fb37f;
+  --color-accent-hover: #7cc397;
+  --color-accent-ink: #06210f;
+  --color-focus-ring: #5fb37f;
+}
+
+[data-accent="violet"] {
+  --color-accent: #6d28d9;
+  --color-accent-hover: #5b21b6;
+  --color-accent-ink: #ffffff;
+  --color-focus-ring: #6d28d9;
+}
+.dark[data-accent="violet"] {
+  --color-accent: #a78bfa;
+  --color-accent-hover: #bba4fb;
+  --color-accent-ink: #1e1033;
+  --color-focus-ring: #a78bfa;
+}
+
+[data-accent="rose"] {
+  --color-accent: #be185d;
+  --color-accent-hover: #9d174d;
+  --color-accent-ink: #ffffff;
+  --color-focus-ring: #be185d;
+}
+.dark[data-accent="rose"] {
+  --color-accent: #f472b6;
+  --color-accent-hover: #f691c8;
+  --color-accent-ink: #3f0620;
+  --color-focus-ring: #f472b6;
+}
+
+[data-accent="amber"] {
+  --color-accent: #a16207;
+  --color-accent-hover: #854d0e;
+  --color-accent-ink: #ffffff;
+  --color-focus-ring: #a16207;
+}
+.dark[data-accent="amber"] {
+  --color-accent: #fbbf24;
+  --color-accent-hover: #fcce53;
+  --color-accent-ink: #422006;
+  --color-focus-ring: #fbbf24;
+}
+
+@theme inline {
+  --color-surface: var(--color-surface);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-surface-sunken: var(--color-surface-sunken);
+  --color-ink: var(--color-ink);
+  --color-ink-muted: var(--color-ink-muted);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-line: var(--color-line);
+  --color-line-strong: var(--color-line-strong);
+  --color-accent: var(--color-accent);
+  --color-accent-hover: var(--color-accent-hover);
+  --color-accent-ink: var(--color-accent-ink);
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-error: var(--color-error);
+  --color-info: var(--color-info);
+
+  --font-display: var(--font-space-grotesk);
+  --font-sans: var(--font-jakarta);
+  --font-mono: var(--font-jetbrains-mono);
+
+  --animate-fade-up: fade-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-scale-in: scale-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Scrollbar — subtle, matches surface tone */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+  border: 2px solid var(--color-surface);
+}

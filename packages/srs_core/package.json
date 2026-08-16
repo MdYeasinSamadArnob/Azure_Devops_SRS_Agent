@@ -1,0 +1,8 @@
+{
+  "name": "@srs-agent/srs-core",
+  "private": true,
+  "scripts": {
+    "lint": "docker compose -f ../../docker-compose.yml run --rm api ruff check /app/packages/srs_core",
+    "test": "echo \"covered by apps/worker's test suite (imports srs_core directly)\" && exit 0"
+  }
+}

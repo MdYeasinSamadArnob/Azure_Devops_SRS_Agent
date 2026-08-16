@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install root workspace dependencies
+        run: npm install
+
+      - name: Prepare env file
+        run: cp .env.example .env
+
+      - name: Build service images
+        run: docker compose build api worker-default web
+
+      - name: Lint (eslint + ruff across every workspace)
+        run: npm run lint
+
+      - name: Typecheck (tsc + mypy)
+        run: npm run typecheck
+
+      - name: Test (pytest across worker/srs_core)
+        run: npm run test
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
