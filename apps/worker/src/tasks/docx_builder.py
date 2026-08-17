@@ -636,13 +636,20 @@ def _add_traceability_table(document: Document, traceability: list[dict]) -> Non
         row[3].text = entry["azure_url"]
 
 
+def resolve_document_title(context: dict) -> str:
+    document_metadata = context.get("document_metadata") or {}
+    roots = context.get("roots") or []
+    epic_titles = [r["title"] for r in roots if r["work_item_type"] == "Epic"]
+    return document_metadata.get("app_name") or (epic_titles[0] if epic_titles else "SRS Document")
+
+
 def build_srs_document(context: dict, minio) -> bytes:
     document = _load_base_document()
 
     document_metadata = context.get("document_metadata") or {}
     roots = context["roots"]
     epic_titles = [r["title"] for r in roots if r["work_item_type"] == "Epic"]
-    app_name = document_metadata.get("app_name") or (epic_titles[0] if epic_titles else "SRS Document")
+    app_name = resolve_document_title(context)
 
     _set_header_app_name(document, app_name)
     _set_footer_year(document, document_metadata.get("footer_year") or str(date.today().year))
