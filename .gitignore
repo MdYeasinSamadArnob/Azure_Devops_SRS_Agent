@@ -40,3 +40,9 @@ scratch/
 .claude/
 
 .gitattributes
+
+
+docs/image-compression.md
+readings/
+
+quick.txt
