@@ -39,3 +39,10 @@ scratch/
 # Claude Code session-local state (lock files, not project content)
 .claude/
 
+.gitattributes
+
+
+docs/image-compression.md
+readings/
+
+quick.txt

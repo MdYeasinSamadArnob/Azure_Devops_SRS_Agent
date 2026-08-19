@@ -31,14 +31,19 @@ from srs_core.enums import BUCKET_GENERATED_DOCUMENTS
 from srs_core.llm.adapter import get_default_adapter
 from srs_core.parsing.custom_fields import extract_content_fields
 from srs_core.rendering.html_text import blocks_to_plain_text, html_to_blocks
-from srs_core.storage.minio_client import MinioClient, MinioSettings, generated_document_key
+from srs_core.storage.minio_client import (
+    MinioClient,
+    MinioSettings,
+    build_document_filename,
+    generated_document_key,
+)
 
 from src.celery_app import celery_app
 from src.config import get_worker_settings
 from src.db import session_scope
 from src.progress import mark_failed, report_stage
 from src.storage_helpers import upload_with_fallback
-from src.tasks.docx_builder import build_srs_document
+from src.tasks.docx_builder import build_srs_document, resolve_document_title
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +329,8 @@ def render_docx(self, context: dict[str, Any]) -> dict[str, Any]:
 
             minio = _get_minio_client()
             docx_bytes = build_srs_document(context, minio)
+            title = resolve_document_title(context)
+            context["document_title"] = title
 
             generation_id = str(uuid.uuid4())
             docx_key = generated_document_key(
@@ -346,7 +353,9 @@ def render_docx(self, context: dict[str, Any]) -> dict[str, Any]:
                 sha256_hash=hashlib.sha256(docx_bytes).hexdigest(),
                 content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 byte_size=len(docx_bytes),
-                original_filename="srs_document.docx",
+                original_filename=build_document_filename(
+                    title, datetime.fromisoformat(context["generated_at"]), "docx"
+                ),
                 download_status="completed",
             )
             session.add(docx_asset)
@@ -433,7 +442,9 @@ def convert_pdf(self, context: dict[str, Any]) -> dict[str, Any]:
                 sha256_hash=hashlib.sha256(pdf_bytes).hexdigest(),
                 content_type="application/pdf",
                 byte_size=len(pdf_bytes),
-                original_filename="srs_document.pdf",
+                original_filename=build_document_filename(
+                    context["document_title"], datetime.fromisoformat(context["generated_at"]), "pdf"
+                ),
                 download_status="completed",
             )
             session.add(pdf_asset)

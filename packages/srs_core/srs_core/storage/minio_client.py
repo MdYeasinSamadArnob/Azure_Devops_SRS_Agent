@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import boto3
@@ -45,6 +46,15 @@ def template_key(tenant_id: str, template_id: str, version: int) -> str:
 
 def generated_document_key(tenant_id: str, srs_project_id: str, generation_id: str, filename: str) -> str:
     return f"{tenant_id}/{srs_project_id}/{generation_id}/{sanitize_filename(filename)}"
+
+
+def build_document_filename(title: str, generated_at: datetime, extension: str) -> str:
+    """The human-facing download filename for a generated document —
+    independent of the MinIO object key, which stays a fixed
+    `document.<ext>` basename under its own unique-namespaced path.
+    """
+    timestamp = generated_at.strftime("%Y%m%d_%H%M%S")
+    return f"{sanitize_filename(title)}_{timestamp}.{extension}"
 
 
 @dataclass(frozen=True)
