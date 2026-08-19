@@ -358,15 +358,36 @@ _MAX_EMBEDDED_IMAGE_WIDTH_PX = 1600
 
 
 def _downscale_image_bytes(image_bytes: bytes, *, max_width_px: int = _MAX_EMBEDDED_IMAGE_WIDTH_PX) -> bytes:
+    """Every image is re-encoded, not just ones over `max_width_px` — a
+    dense screenshot well under the width cap can still be a multi-MB PNG,
+    and leaving it untouched was the actual reason a lot of images weren't
+    getting any smaller. Format is never converted (PNG stays PNG, JPEG
+    stays JPEG) — only the pixel/color encoding is tightened.
+    """
     try:
         with Image.open(BytesIO(image_bytes)) as img:
-            if img.width <= max_width_px:
-                return image_bytes
-            ratio = max_width_px / img.width
-            new_size = (max_width_px, max(1, round(img.height * ratio)))
-            resized = img.resize(new_size, Image.Resampling.LANCZOS)
+            fmt = (img.format or "PNG").upper()  # .resize() below drops .format, so capture it first
+            if img.width > max_width_px:
+                ratio = max_width_px / img.width
+                new_size = (max_width_px, max(1, round(img.height * ratio)))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
             buf = BytesIO()
-            resized.save(buf, format=img.format or "PNG", optimize=True)
+            if fmt == "PNG":
+                # FASTOCTREE is the Pillow-recommended quantize method for
+                # images with an alpha channel — a plain palette convert
+                # silently flattens transparency to black, which would
+                # corrupt any screenshot/diagram exported with a
+                # transparent background.
+                img.quantize(colors=256, method=Image.Quantize.FASTOCTREE).save(buf, format="PNG", optimize=True)
+            elif fmt in ("JPEG", "JPG"):
+                # Only force an RGB conversion when the source mode isn't
+                # already JPEG-safe, so a grayscale JPEG doesn't get
+                # needlessly blown up to 3-channel RGB.
+                to_save = img if img.mode in ("RGB", "L") else img.convert("RGB")
+                to_save.save(buf, format="JPEG", quality=80, optimize=True)
+            else:
+                img.save(buf, format=fmt, optimize=True)
             return buf.getvalue()
     except Exception:  # noqa: BLE001 — a bad/unreadable image falls back to the original bytes, not a crash
         logger.warning("failed to downscale image before embedding — using original bytes", exc_info=True)

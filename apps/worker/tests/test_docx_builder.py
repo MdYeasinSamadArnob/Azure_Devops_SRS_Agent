@@ -401,6 +401,28 @@ def _build_oversized_png(width: int, height: int) -> bytes:
     return buf.getvalue()
 
 
+def _build_test_jpeg(width: int, height: int) -> bytes:
+    from PIL import Image
+
+    img = Image.new("RGB", (width, height), color=(200, 90, 40))
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _build_transparent_png(width: int, height: int) -> bytes:
+    from PIL import Image
+
+    img = Image.new("RGBA", (width, height), color=(120, 60, 200, 255))
+    # Punch out a fully transparent region so quantization has real alpha to preserve.
+    for x in range(width // 2):
+        for y in range(height // 2):
+            img.putpixel((x, y), (0, 0, 0, 0))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def test_downscale_image_bytes_shrinks_images_over_the_max_width():
     from PIL import Image
 
@@ -412,14 +434,66 @@ def test_downscale_image_bytes_shrinks_images_over_the_max_width():
     with Image.open(BytesIO(result)) as img:
         assert img.width == _MAX_EMBEDDED_IMAGE_WIDTH_PX
         assert img.height == 800  # 2:1 aspect ratio preserved (3000x1500 -> 1600x800)
+        assert img.format == "PNG"
     assert len(result) < len(oversized)
 
 
-def test_downscale_image_bytes_leaves_small_images_untouched():
+def test_downscale_image_bytes_reencodes_small_png_instead_of_passing_it_through():
+    from PIL import Image
+
     from src.tasks.docx_builder import _downscale_image_bytes
 
     small = _build_oversized_png(400, 300)
-    assert _downscale_image_bytes(small) == small
+    result = _downscale_image_bytes(small)
+
+    assert result != small  # every image is re-encoded now, not just oversized ones
+    with Image.open(BytesIO(result)) as img:
+        assert (img.width, img.height) == (400, 300)  # dimensions unchanged
+        assert img.format == "PNG"  # format unchanged
+
+
+def test_downscale_image_bytes_preserves_jpeg_format_when_small():
+    from PIL import Image
+
+    from src.tasks.docx_builder import _downscale_image_bytes
+
+    small = _build_test_jpeg(400, 300)
+    result = _downscale_image_bytes(small)
+
+    with Image.open(BytesIO(result)) as img:
+        assert img.format == "JPEG"  # never converted to PNG
+        assert (img.width, img.height) == (400, 300)
+
+
+def test_downscale_image_bytes_preserves_jpeg_format_and_aspect_ratio_when_large():
+    from PIL import Image
+
+    from src.tasks.docx_builder import _MAX_EMBEDDED_IMAGE_WIDTH_PX, _downscale_image_bytes
+
+    oversized = _build_test_jpeg(3000, 1500)
+    result = _downscale_image_bytes(oversized)
+
+    with Image.open(BytesIO(result)) as img:
+        assert img.format == "JPEG"
+        assert img.width == _MAX_EMBEDDED_IMAGE_WIDTH_PX
+        assert img.height == 800  # 2:1 aspect ratio preserved
+
+
+def test_downscale_image_bytes_preserves_transparency_through_png_quantization():
+    from PIL import Image
+
+    from src.tasks.docx_builder import _downscale_image_bytes
+
+    transparent = _build_transparent_png(200, 200)
+    result = _downscale_image_bytes(transparent)
+
+    with Image.open(BytesIO(result)) as img:
+        assert img.format == "PNG"
+        has_alpha_channel = img.mode in ("RGBA", "LA") or "transparency" in img.info
+        assert has_alpha_channel
+        rgba = img.convert("RGBA")
+        assert rgba.getpixel((0, 0))[3] == 0  # the punched-out corner is still transparent
+        assert rgba.getpixel((150, 150))[3] > 0  # the opaque region is still opaque
 
 
 def test_downscale_image_bytes_falls_back_to_original_on_unreadable_input():
