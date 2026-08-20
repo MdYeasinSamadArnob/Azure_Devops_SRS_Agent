@@ -64,7 +64,11 @@ STYLE_NARRATIVE = "S Notes"
 # template's styles.xml: no <w:numPr> anywhere in its definition). "List
 # Bullet" is the style Word itself defines WITH numbering baked in.
 STYLE_BULLET = "List Bullet"
+STYLE_NUMBER = "List Number"  # for <ol>-derived Markdown lists — falls back gracefully if the template lacks it
 TABLE_STYLE = "Table Grid"
+_CODE_FONT_NAME = "Consolas"
+_CODE_BLOCK_FONT_SIZE_PT = 9.5
+_CODE_BLOCK_SHADING_FILL = "D9D9D9"  # light grey
 
 _TEMPLATE_DIR = Path(__file__).resolve().parents[4] / "templates"
 ORG_TEMPLATE_PATH = _TEMPLATE_DIR / "main_template_SRS-Customer-BankAsiaSmartApp-V0.5.8.docx"
@@ -102,6 +106,8 @@ def _apply_run_formatting(run, run_data: dict) -> None:
         run.italic = True
     if run_data.get("underline"):
         run.underline = True
+    if run_data.get("mono"):
+        run.font.name = _CODE_FONT_NAME
 
 
 def _add_runs_paragraph(document_or_cell, runs: list[dict], style: str | None = None):
@@ -484,6 +490,107 @@ def _render_table_block(document: Document, rows: list[list[list[dict]]]) -> Non
 _CAPTION_MAX_LENGTH = 100  # a heading-like line (e.g. "Context Diagram"), not a paragraph of prose
 
 
+# Sizes for headings that originate from Markdown-formatted custom field
+# content (e.g. "## Overview" inside a "Data Dictionary" field) — bold,
+# direct run formatting only, no named Word heading style. Reusing a real
+# heading style (STYLE_SECTION_HEADING etc.) would pull every one of these
+# into the auto-generated Table of Contents (_add_toc_field) alongside real
+# Epic/Feature/Story headings, which isn't wanted for arbitrary org-authored
+# field content — same reasoning as _render_content_sections's own
+# direct-bold section label just below.
+_MARKDOWN_HEADING_FONT_SIZE_PT = {1: 14, 2: 13, 3: 12}
+
+
+def _render_heading_block(document: Document, runs: list[dict], level: int) -> None:
+    paragraph = _add_runs_paragraph(document, runs, style=STYLE_NARRATIVE)
+    size = _MARKDOWN_HEADING_FONT_SIZE_PT.get(level, 11)
+    for run in paragraph.runs:
+        run.bold = True
+        run.font.size = Pt(size)
+
+
+def _shade_paragraph(paragraph, fill_hex: str) -> None:
+    """Paragraph background shading has no high-level python-docx API -
+    this is the standard, safe way to do it: build a real `w:shd` element
+    via lxml (same approach as everything else in this pipeline - never
+    raw XML strings) and attach it to the paragraph's properties.
+    """
+    pPr = paragraph._p.get_or_add_pPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill_hex)
+    pPr.append(shd)
+
+
+def _render_code_block(document: Document, text: str, language: str | None) -> None:
+    """A fenced ```code``` block from a Markdown custom field — grey-shaded,
+    monospace, with exact line breaks preserved (a plain docx paragraph
+    doesn't keep "\\n" as visual breaks on its own, hence the explicit
+    add_break() per line rather than one run per block).
+    """
+    paragraph = document.add_paragraph()
+    _shade_paragraph(paragraph, _CODE_BLOCK_SHADING_FILL)
+    lines = text.split("\n") or [""]
+    for i, line in enumerate(lines):
+        run = paragraph.add_run(line or " ")  # a blank line still needs a run so the shading shows through it
+        run.font.name = _CODE_FONT_NAME
+        run.font.size = Pt(_CODE_BLOCK_FONT_SIZE_PT)
+        if i < len(lines) - 1:
+            run.add_break()  # soft line break - keeps every line inside the one shaded paragraph
+    document.add_paragraph()  # breathing room after the block
+
+
+def _style_exists(document: Document, name: str) -> bool:
+    try:
+        document.styles[name]
+    except KeyError:
+        return False
+    return True
+
+
+_LIST_INDENT_PER_LEVEL_PT = 18
+
+
+def _list_style_for_level(document: Document, ordered: bool, level: int) -> str | None:
+    """Word ships "List Bullet"/"List Number" for the top level and
+    "... 2"/"... 3" for deeper nesting - prefer those native styles so a
+    numbered outline with a bullet sub-list gets Word's own correct visual
+    nesting. But the org template is a curated custom style set (see the
+    STYLE_* constants above) that's only ever been verified to define "List
+    Bullet" — NOT "List Number" or any "... 2"/"... 3" variant. Silently
+    falling back to unstyled "Normal" paragraphs for those (as
+    _safe_add_paragraph's generic KeyError handling would) would mean
+    numbered/nested lists render with no bullet, no number, no indent at
+    all — a real regression, not a graceful degradation. So this checks
+    style existence up front and prefers, in order: the ideal per-level
+    style, the base style with no level suffix, then any bullet at all
+    (some visual list marker beats none) — real indentation is still
+    applied directly per level regardless of which style wins, since that
+    doesn't depend on the template defining anything extra.
+    """
+    base = STYLE_NUMBER if ordered else STYLE_BULLET
+    candidates = ([f"{base} {level + 1}"] if level > 0 else []) + [base, STYLE_BULLET]
+    for name in candidates:
+        if _style_exists(document, name):
+            return name
+    return None
+
+
+def _render_list_block(document: Document, block: dict, level: int = 0) -> None:
+    ordered = bool(block.get("ordered"))
+    style = _list_style_for_level(document, ordered, level)
+    for item in block.get("items") or []:
+        runs = item.get("runs") or []
+        if runs:
+            paragraph = _add_runs_paragraph(document, runs, style=style)
+            if level > 0:
+                paragraph.paragraph_format.left_indent = Pt(_LIST_INDENT_PER_LEVEL_PT * level)
+        sublist = item.get("sublist")
+        if sublist:
+            _render_list_block(document, sublist, level=level + 1)
+
+
 def _render_blocks(document: Document, blocks: list[dict], *, minio, assets: list[dict], used_object_keys: set[str]) -> None:
     """Renders `html_to_blocks` output with layout matching each block's
     actual shape: a real table for `table`, bullet paragraphs for `list`,
@@ -508,11 +615,16 @@ def _render_blocks(document: Document, blocks: list[dict], *, minio, assets: lis
         block_type = block.get("type")
         if block_type == "table":
             _render_table_block(document, block.get("rows") or [])
+        elif block_type == "code":
+            _render_code_block(document, block.get("text") or "", block.get("language"))
         elif block_type == "image":
             _render_image_block(document, minio, block, assets, used_object_keys, caption=None)
         elif block_type == "list":
-            for item_runs in block.get("items") or []:
-                _add_runs_paragraph(document, item_runs, style=STYLE_BULLET)
+            _render_list_block(document, block)
+        elif block_type == "heading":
+            runs = block.get("runs") or []
+            if runs:
+                _render_heading_block(document, runs, block.get("level") or 2)
         else:  # "text"
             runs = block.get("runs") or []
             if not runs:

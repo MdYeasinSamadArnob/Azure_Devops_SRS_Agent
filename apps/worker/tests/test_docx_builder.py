@@ -16,6 +16,7 @@ from docx.oxml.ns import qn
 
 import src.tasks.docx_builder as docx_builder_module
 from src.tasks.docx_builder import build_srs_document
+from srs_core.rendering.html_text import html_to_blocks
 
 
 def _media_file_count(docx_bytes: bytes) -> int:
@@ -86,8 +87,8 @@ def _node(work_item_type, azure_id, title, **overrides):
     return node
 
 
-def _run(text: str, *, bold: bool = False, italic: bool = False, underline: bool = False) -> dict:
-    return {"text": text, "bold": bold, "italic": italic, "underline": underline}
+def _run(text: str, *, bold: bool = False, italic: bool = False, underline: bool = False, mono: bool = False) -> dict:
+    return {"text": text, "bold": bold, "italic": italic, "underline": underline, "mono": mono}
 
 
 def _text_blocks(text: str, **run_kwargs) -> list[dict]:
@@ -102,8 +103,8 @@ def _table_block(rows: list[list[str]]) -> dict:
     return {"type": "table", "rows": [[[_run(cell)] for cell in row] for row in rows]}
 
 
-def _list_block(items: list[str]) -> dict:
-    return {"type": "list", "items": [[_run(item)] for item in items]}
+def _list_block(items: list[str], *, ordered: bool = False) -> dict:
+    return {"type": "list", "ordered": ordered, "items": [{"runs": [_run(item)], "sublist": None} for item in items]}
 
 
 def _asset(bucket: str, object_key: str, source_url: str | None = None) -> dict:
@@ -579,6 +580,57 @@ def test_custom_content_sections_rendered_on_leaf_task_nodes_too():
     assert "Task-level detail that must not be dropped." in full_text
 
 
+def test_markdown_custom_field_renders_as_real_formatting_not_raw_syntax():
+    """Regression test for a real reported bug: a custom field ("Data
+    Dictionary") authored in Markdown, not HTML, rendered in the generated
+    DOCX as one wall of raw '#'/'**'/'* * *'/'|' characters instead of a
+    real heading, bold text, and a table.
+    """
+    markdown_field = (
+        "# InsightX Metadata Database Data Dictionary\n\n"
+        "**Database:** PostgreSQL 16+\n\n"
+        "* * *\n\n"
+        "Overview\n--------\n\n"
+        "It **does not store business data** from customer databases.\n\n"
+        "| Symbol | Meaning |\n"
+        "| --- | --- |\n"
+        "| PK | Primary Key |\n"
+    )
+    epic = _node(
+        "Epic",
+        1,
+        "Some Epic",
+        content_sections=[{"label": "Data Dictionary", "blocks": html_to_blocks(markdown_field)}],
+    )
+    docx_bytes = build_srs_document(_base_context([epic]), _fake_minio())
+    doc = Document(BytesIO(docx_bytes))
+    paragraphs = [p for p in doc.paragraphs if p.text.strip()]
+    full_text = "\n".join(p.text for p in paragraphs)
+
+    # None of the literal Markdown syntax from the field survives anywhere
+    # in the document — checked as exact substrings, not a blanket "no #
+    # anywhere" ban, since the document's own traceability matrix
+    # legitimately renders work-item IDs as "#1"/"#2" elsewhere.
+    assert "# InsightX" not in full_text
+    assert "**does not store" not in full_text
+    assert "* * *" not in full_text
+    assert "--------" not in full_text
+    assert "| PK | Primary Key |" not in full_text
+
+    # The Setext heading became a real, bold heading paragraph.
+    overview_para = next(p for p in paragraphs if p.text == "Overview")
+    assert overview_para.runs[0].bold is True
+
+    # The inline-bold phrase actually rendered bold, not as literal asterisks.
+    bold_runs = [r for p in paragraphs for r in p.runs if r.bold]
+    assert any("does not store business data" in r.text for r in bold_runs)
+
+    # The pipe table became a real Word table, not a "| PK | ... |" row of text.
+    table = next(t for t in doc.tables if t.rows[0].cells[0].text == "Symbol")
+    assert table.rows[1].cells[0].text == "PK"
+    assert table.rows[1].cells[1].text == "Primary Key"
+
+
 def test_ai_introduction_used_when_present_with_visible_marker():
     context = _base_context([_node("Epic", 1, "E")])
     context["ai_introduction"] = "Custom AI summary text."
@@ -675,6 +727,54 @@ def test_list_content_section_renders_each_item_as_a_separate_bullet():
     assert "Every change is logged." in bullet_paras
 
 
+def test_nested_markdown_list_renders_numbered_top_level_with_indented_sub_bullets():
+    """Regression test for a real reported bug: a numbered outline with an
+    indented bullet sub-list under one item (a Table of Contents, in the
+    actual report) lost several top-level sibling items entirely.
+
+    The org template only defines "List Bullet" (verified — no "List
+    Number", no "List Bullet 2/3"), so every level here falls back to that
+    same style; nesting still has to be visually distinguishable via
+    explicit indentation, which is what this actually asserts.
+    """
+    md = "1. Introduction\n2. Database Objects\n    - 4.1 Datasources\n    - 4.2 Metadata Annotation\n3. Appendix\n"
+    epic = _node(
+        "Epic", 1, "Epic", content_sections=[{"label": "Table of Contents", "blocks": html_to_blocks(md)}]
+    )
+    docx_bytes = build_srs_document(_base_context([epic]), _fake_minio())
+    doc = Document(BytesIO(docx_bytes))
+
+    by_text = {p.text: p for p in doc.paragraphs if p.style}
+    # All 5 items present and readable — the actual data-loss bug is fixed.
+    for text in ("Introduction", "Database Objects", "Appendix", "4.1 Datasources", "4.2 Metadata Annotation"):
+        assert text in by_text, f"missing list item: {text!r}"
+
+    top_level = [by_text["Introduction"], by_text["Database Objects"], by_text["Appendix"]]
+    nested = [by_text["4.1 Datasources"], by_text["4.2 Metadata Annotation"]]
+    assert all(p.style.name == "List Bullet" for p in top_level + nested)
+    # Nested items get extra indentation the top-level ones don't, so the
+    # hierarchy still reads visually even without a distinct numbered style.
+    assert all((p.paragraph_format.left_indent or 0) == 0 for p in top_level)
+    assert all((p.paragraph_format.left_indent or 0) > 0 for p in nested)
+
+
+def test_fenced_code_block_renders_shaded_monospace_with_preserved_lines():
+    md = "Setup:\n\n```sql\nCREATE TABLE t (\n    id UUID PRIMARY KEY\n);\n```\n"
+    epic = _node("Epic", 1, "Epic", content_sections=[{"label": "DDL", "blocks": html_to_blocks(md)}])
+    docx_bytes = build_srs_document(_base_context([epic]), _fake_minio())
+    doc = Document(BytesIO(docx_bytes))
+
+    code_para = next(p for p in doc.paragraphs if "CREATE TABLE t" in p.text)
+    assert "id UUID PRIMARY KEY" in code_para.text  # multi-line content preserved in one paragraph
+    assert all(run.font.name == "Consolas" for run in code_para.runs if run.text.strip())
+    # Grey paragraph shading applied via raw w:shd, not exposed by a high-level property.
+    shd = code_para._p.find(
+        ".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}shd"
+    )
+    assert shd is not None
+    assert shd.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}fill") == "D9D9D9"
+
+
 def test_narrative_content_is_left_aligned_not_justified():
     """Regression test for a real reported bug: the org template's "S
     Notes" style defaults to JUSTIFY, which stretched short lines (a table
@@ -732,7 +832,18 @@ def test_inline_bold_preserved_in_bullet_lists_too():
         content_sections=[
             {
                 "label": "Business Rules",
-                "blocks": [{"type": "list", "items": [[_run("Only "), _run("admins", bold=True), _run(" may approve.")]]}],
+                "blocks": [
+                    {
+                        "type": "list",
+                        "ordered": False,
+                        "items": [
+                            {
+                                "runs": [_run("Only "), _run("admins", bold=True), _run(" may approve.")],
+                                "sublist": None,
+                            }
+                        ],
+                    }
+                ],
             }
         ],
     )

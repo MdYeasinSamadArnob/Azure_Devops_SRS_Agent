@@ -241,9 +241,16 @@ def test_render_docx_survives_malformed_html_and_deeply_nested_hierarchy(db_sess
                         "acceptance_criteria_blocks": [
                             {
                                 "type": "list",
+                                "ordered": False,
                                 "items": [
-                                    [{"text": "must handle X", "bold": False, "italic": False, "underline": False}],
-                                    [{"text": "must handle Y", "bold": False, "italic": False, "underline": False}],
+                                    {
+                                        "runs": [{"text": "must handle X", "bold": False, "italic": False, "underline": False}],
+                                        "sublist": None,
+                                    },
+                                    {
+                                        "runs": [{"text": "must handle Y", "bold": False, "italic": False, "underline": False}],
+                                        "sublist": None,
+                                    },
                                 ],
                             }
                         ],
