@@ -6,6 +6,7 @@ GENERATE, so nothing needs mocking except the LLM call (kept fast/offline
 here; test_llm_adapter.py covers the real Ollama integration separately).
 """
 
+import re
 from datetime import datetime, timezone
 from io import BytesIO
 from unittest.mock import patch
@@ -91,13 +92,23 @@ def test_generate_chain_produces_docx_and_pdf(db_session, default_tenant, fixtur
                 secure=settings.minio_secure,
             )
         )
+        # No document_metadata was supplied for this job, so the filename
+        # falls back to the root Epic's title ("Epic One" per the fixture),
+        # sanitized, plus a YYYYMMDD_HHMMSS timestamp shared by the docx/pdf pair.
+        filename_pattern = re.compile(r"^Epic_One_(\d{8}_\d{6})\.(docx|pdf)$")
         docx_doc_asset = None
+        timestamps_by_format = {}
         for doc in docs:
             asset_row = db_session.get(Asset, doc.asset_id)
             assert minio.object_exists(asset_row.bucket, asset_row.object_key)
             assert asset_row.byte_size > 0
+            match = filename_pattern.match(asset_row.original_filename)
+            assert match, f"unexpected filename: {asset_row.original_filename}"
+            assert match.group(2) == doc.format
+            timestamps_by_format[doc.format] = match.group(1)
             if doc.format == "docx":
                 docx_doc_asset = asset_row
+        assert timestamps_by_format["docx"] == timestamps_by_format["pdf"]
 
         # Verify the actual hierarchical structure made it into the document.
         docx_bytes = minio.download_bytes(docx_doc_asset.bucket, docx_doc_asset.object_key)
@@ -230,9 +241,16 @@ def test_render_docx_survives_malformed_html_and_deeply_nested_hierarchy(db_sess
                         "acceptance_criteria_blocks": [
                             {
                                 "type": "list",
+                                "ordered": False,
                                 "items": [
-                                    [{"text": "must handle X", "bold": False, "italic": False, "underline": False}],
-                                    [{"text": "must handle Y", "bold": False, "italic": False, "underline": False}],
+                                    {
+                                        "runs": [{"text": "must handle X", "bold": False, "italic": False, "underline": False}],
+                                        "sublist": None,
+                                    },
+                                    {
+                                        "runs": [{"text": "must handle Y", "bold": False, "italic": False, "underline": False}],
+                                        "sublist": None,
+                                    },
                                 ],
                             }
                         ],

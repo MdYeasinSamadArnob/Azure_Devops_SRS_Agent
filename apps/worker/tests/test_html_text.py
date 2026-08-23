@@ -35,11 +35,15 @@ def test_docxtpl_safe_text_passthrough_for_none():
 
 
 def _plain(text: str) -> dict:
-    return {"text": text, "bold": False, "italic": False, "underline": False}
+    return {"text": text, "bold": False, "italic": False, "underline": False, "mono": False}
 
 
 def _bold(text: str) -> dict:
-    return {"text": text, "bold": True, "italic": False, "underline": False}
+    return {"text": text, "bold": True, "italic": False, "underline": False, "mono": False}
+
+
+def _item(*run_dicts: dict, sublist: dict | None = None) -> dict:
+    return {"runs": list(run_dicts), "sublist": sublist}
 
 
 def _run_texts(runs: list[dict]) -> list[str]:
@@ -75,7 +79,14 @@ def test_html_to_blocks_parses_a_list_into_items():
     html = "<ul><li>Only admins may approve.</li><li>Every change is logged.</li></ul>"
     blocks = html_to_blocks(html)
     assert blocks == [
-        {"type": "list", "items": [[_plain("Only admins may approve.")], [_plain("Every change is logged.")]]}
+        {
+            "type": "list",
+            "ordered": False,
+            "items": [
+                _item(_plain("Only admins may approve.")),
+                _item(_plain("Every change is logged.")),
+            ],
+        }
     ]
 
 
@@ -135,7 +146,7 @@ def test_html_to_blocks_preserves_bold_italic_underline_as_run_flags():
 def test_html_to_blocks_preserves_bold_within_list_items():
     html = "<ul><li>Only <b>admins</b> may approve.</li></ul>"
     blocks = html_to_blocks(html)
-    item_runs = blocks[0]["items"][0]
+    item_runs = blocks[0]["items"][0]["runs"]
     assert any(r["bold"] and r["text"].strip() == "admins" for r in item_runs)
     assert any(not r["bold"] and "Only" in r["text"] for r in item_runs)
 
@@ -194,12 +205,298 @@ def test_blocks_to_plain_text_skips_image_blocks_without_crashing():
 def test_blocks_to_plain_text_flattens_every_block_type():
     blocks = [
         {"type": "text", "runs": [_plain("Intro.")]},
-        {"type": "list", "items": [[_plain("one")], [_plain("two")]]},
+        {"type": "list", "ordered": False, "items": [_item(_plain("one")), _item(_plain("two"))]},
         {"type": "table", "rows": [[[_plain("a")], [_plain("b")]], [[_plain("c")], [_plain("d")]]]},
+        {"type": "code", "text": "SELECT 1;", "language": "sql"},
     ]
     flat = blocks_to_plain_text(blocks)
-    assert flat == "Intro.\none\ntwo\na | b\nc | d"
+    assert flat == "Intro.\none\ntwo\na | b\nc | d\nSELECT 1;"
 
 
 def test_blocks_to_plain_text_empty_list_returns_empty_string():
     assert blocks_to_plain_text([]) == ""
+
+
+def test_blocks_to_plain_text_includes_heading_text():
+    blocks = [{"type": "heading", "level": 2, "runs": [_plain("Overview")]}, {"type": "text", "runs": [_plain("Body.")]}]
+    assert blocks_to_plain_text(blocks) == "Overview\nBody."
+
+
+# -- Markdown-formatted custom fields ------------------------------------
+#
+# Regression coverage for a real reported bug: a custom Azure DevOps field
+# (e.g. "Data Dictionary") authored in Markdown, not HTML, rendered in the
+# generated DOCX as one wall of raw '#'/'**'/'* * *'/'|' characters instead
+# of real headings/bold/tables — html_to_blocks had zero Markdown awareness
+# and HTMLParser doesn't react to any of that syntax.
+
+
+def test_html_to_blocks_converts_a_genuine_markdown_field_into_real_blocks():
+    md = (
+        "# Title\n\n"
+        "**Database:** PostgreSQL 16+\n\n"
+        "* * *\n\n"
+        "Overview\n--------\n\n"
+        "It **does not store business data** from customer databases.\n\n"
+        "| Symbol | Meaning |\n"
+        "| --- | --- |\n"
+        "| PK | Primary Key |\n"
+    )
+    blocks = html_to_blocks(md)
+    types = [b["type"] for b in blocks]
+    assert types.count("heading") >= 2  # ATX "# Title" and Setext "Overview\n---"
+    assert "table" in types
+
+    title_block = next(b for b in blocks if b["type"] == "heading")
+    assert _run_texts(title_block["runs"]) == ["Title"]
+    assert title_block["level"] == 1
+
+    intro_block = next(b for b in blocks if b["type"] == "text" and "Database:" in _run_texts(b["runs"])[0])
+    assert any(r["bold"] and r["text"].strip() == "Database:" for r in intro_block["runs"])
+
+    body_block = next(b for b in blocks if b["type"] == "text" and any("does not store" in t for t in _run_texts(b["runs"])))
+    assert any(r["bold"] and "does not store business data" in r["text"] for r in body_block["runs"])
+
+    table_block = next(b for b in blocks if b["type"] == "table")
+    header_texts = [_run_texts(cell) for cell in table_block["rows"][0]]
+    assert header_texts == [["Symbol"], ["Meaning"]]
+    assert any(_run_texts(cell) == ["PK"] for row in table_block["rows"] for cell in row)
+
+    # No literal Markdown syntax characters survive anywhere in the output.
+    flat = blocks_to_plain_text(blocks)
+    assert "#" not in flat
+    assert "**" not in flat
+    assert "* * *" not in flat
+
+
+def test_html_to_blocks_does_not_convert_a_lone_stray_hash_in_plain_prose():
+    """The false-positive guard: a single weak signal (one ATX-heading-like
+    line) alone must NOT flip an ordinary sentence into Markdown mode.
+    """
+    text = "# 4 is blocked because the upstream service is down."
+    blocks = html_to_blocks(text)
+    assert [b["type"] for b in blocks] == ["text"]
+    assert _run_texts(blocks[0]["runs"])[0].startswith("#")
+
+
+def test_html_to_blocks_does_not_convert_a_lone_bold_pair_in_plain_prose():
+    text = "Please review this **before** the end of day."
+    blocks = html_to_blocks(text)
+    assert [b["type"] for b in blocks] == ["text"]
+    assert "**before**" in _run_texts(blocks[0]["runs"])[0]
+
+
+def test_html_to_blocks_converts_when_two_weak_signals_corroborate():
+    # No strong signal (no table/setext/hr) — but a heading and bold
+    # together are enough independent signals to treat this as genuine
+    # Markdown, not an accidental character in plain prose.
+    text = "# Notice\n\nThis is **important** information for the team."
+    blocks = html_to_blocks(text)
+    heading = next(b for b in blocks if b["type"] == "heading")
+    assert _run_texts(heading["runs"]) == ["Notice"]
+
+
+def test_html_to_blocks_prioritizes_real_html_tags_over_markdown_look_alikes():
+    # Real HTML always wins — Markdown-conversion is never even considered
+    # once an actual tag is present, regardless of what the text inside it
+    # happens to look like.
+    html = "<p>Section # 4 has <b>**not**</b> been reviewed.</p>"
+    blocks = html_to_blocks(html)
+    assert blocks[0]["type"] == "text"
+    assert any(r["bold"] and r["text"] == "**not**" for r in blocks[0]["runs"])
+
+
+def test_html_to_blocks_h3_caption_before_image_still_works_for_real_html():
+    """Genuine Azure HTML already uses <h3> for diagram captions (e.g.
+    "Context Diagram" right above its own <img>) — that must keep landing
+    in a "text" block, not a "heading" block, since the caption-matching
+    logic in docx_builder.py's _render_blocks only looks for "text".
+    Markdown-only content gets real "heading" blocks; real HTML doesn't.
+    """
+    html = "<h3>Context Diagram</h3><img src='ctx.png'/>"
+    blocks = html_to_blocks(html)
+    assert blocks[0]["type"] == "text"
+    assert _run_texts(blocks[0]["runs"]) == ["Context Diagram"]
+
+
+# -- Fenced code blocks ---------------------------------------------------
+#
+# Regression coverage for a real reported bug: a custom field with a
+# ```sql ... ``` fenced code block rendered as literal backtick/language-tag
+# text instead of a distinct, formatted code block — the Markdown-to-HTML
+# conversion never enabled the fenced_code extension, and even once it did,
+# _BlockExtractor had no handling for <pre>/<code> at all.
+
+
+def test_html_to_blocks_parses_a_fenced_code_block():
+    md = "Some intro.\n\n```sql\nCREATE EXTENSION IF NOT EXISTS pgcrypto;\n```\n\nMore text."
+    blocks = html_to_blocks(md)
+    code_block = next(b for b in blocks if b["type"] == "code")
+    assert code_block["text"] == "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+    assert code_block["language"] == "sql"
+    # No literal fence markers or language tag survive as visible text elsewhere.
+    flat = blocks_to_plain_text(blocks)
+    assert "```" not in flat
+    assert "language-sql" not in flat
+
+
+def test_html_to_blocks_preserves_multiline_code_exactly():
+    md = "```sql\nSELECT 1;\n\nSELECT 2;\n```"
+    blocks = html_to_blocks(md)
+    code_block = next(b for b in blocks if b["type"] == "code")
+    assert code_block["text"] == "SELECT 1;\n\nSELECT 2;"
+
+
+def test_html_to_blocks_marks_inline_code_spans_as_mono_not_fenced():
+    # Two corroborating signals (heading + bold) so this is unambiguously
+    # treated as Markdown — inline-code-span syntax alone isn't one of the
+    # detection signals, so it needs the rest of the field to qualify.
+    md = "# Notice\n\nRun `SELECT 1;` to check the connection. This is **important**."
+    blocks = html_to_blocks(md)
+    assert not any(b["type"] == "code" for b in blocks)  # a single-backtick span isn't a fenced block
+    text_block = next(b for b in blocks if b["type"] == "text")
+    assert any(r["mono"] and r["text"] == "SELECT 1;" for r in text_block["runs"])
+
+
+# -- Nested lists -----------------------------------------------------------
+#
+# Regression coverage for a real reported bug: a numbered outline with an
+# indented bullet sub-list under one item (e.g. a Table of Contents) lost
+# several top-level items entirely — the old _BlockExtractor had no stack,
+# just flat _in_list/_list_items state, so starting a nested <ul>/<ol> mid
+# <li> clobbered the outer list's already-collected items.
+
+
+def test_html_to_blocks_nested_list_keeps_every_sibling_item():
+    md = (
+        "1. Introduction\n"
+        "2. Database Objects\n"
+        "    - 4.1 Datasources\n"
+        "    - 4.2 Metadata Annotation\n"
+        "3. Appendix\n"
+    )
+    blocks = html_to_blocks(md)
+    assert len(blocks) == 1
+    top_list = blocks[0]
+    assert top_list["type"] == "list"
+    assert top_list["ordered"] is True
+    top_texts = [_run_texts(item["runs"]) for item in top_list["items"]]
+    assert top_texts == [["Introduction"], ["Database Objects"], ["Appendix"]]
+
+    objects_item = top_list["items"][1]
+    assert objects_item["sublist"] is not None
+    assert objects_item["sublist"]["ordered"] is False
+    sub_texts = [_run_texts(item["runs"]) for item in objects_item["sublist"]["items"]]
+    assert sub_texts == [["4.1 Datasources"], ["4.2 Metadata Annotation"]]
+
+    # Siblings before/after the nested item carry no sublist of their own.
+    assert top_list["items"][0]["sublist"] is None
+    assert top_list["items"][2]["sublist"] is None
+
+
+def test_html_to_blocks_loose_list_boundary_bug_is_worked_around():
+    """The exact reported case: a blank line between a list item's text and
+    its own indented sub-list used to make Python-Markdown lose track of
+    the outer list's boundary entirely, silently swallowing every
+    subsequent top-level item into the nested sub-list instead of keeping
+    them as siblings — verified directly against Python-Markdown's raw HTML
+    output, not guessed.
+    """
+    md = (
+        "1. Introduction\n"
+        "2. Database Objects\n"
+        "\n"
+        "    - 4.1 Datasources\n"
+        "3. Raw Database DDL\n"
+        "4. Appendix\n"
+    )
+    blocks = html_to_blocks(md)
+    top_list = blocks[0]
+    top_texts = [_run_texts(item["runs"]) for item in top_list["items"]]
+    assert top_texts == [["Introduction"], ["Database Objects"], ["Raw Database DDL"], ["Appendix"]]
+    assert top_list["items"][1]["sublist"]["items"][0]["runs"][0]["text"] == "4.1 Datasources"
+
+
+# -- Literal &nbsp; artifacts ------------------------------------------
+#
+# Regression coverage for a real reported bug: a DDL code block pasted
+# into Azure DevOps carried literal "&nbsp;" text (a copy/paste artifact
+# from an HTML source) as indentation filler. Markdown's fenced_code
+# extension HTML-escapes code content on the way in ("&" -> "&amp;"), and
+# our parser correctly decodes that back on the way out — faithfully
+# round-tripping whatever was actually in the source, including the
+# literal "&nbsp;" text, which then showed up as visible garbage instead
+# of the whitespace it was always meant to be.
+
+
+def test_html_to_blocks_normalizes_literal_nbsp_in_fenced_code():
+    md = "```sql\nCREATE TABLE t (\n    id&nbsp;&nbsp;&nbsp;&nbsp;UUID\n);\n```\n"
+    blocks = html_to_blocks(md)
+    code_block = next(b for b in blocks if b["type"] == "code")
+    assert "&nbsp;" not in code_block["text"]
+    assert "id    UUID" in code_block["text"]
+
+
+def test_html_to_blocks_normalizes_literal_nbsp_in_prose_too():
+    # Not just code — the same artifact can show up anywhere in a field.
+    text = "# Notice\n\nPlease&nbsp;review this **before** the end of day."
+    blocks = html_to_blocks(text)
+    flat = blocks_to_plain_text(blocks)
+    assert "&nbsp;" not in flat
+    assert "Please review" in flat
+
+
+def test_html_to_blocks_normalizes_numeric_and_decoded_nbsp_forms():
+    assert "&#160;" not in blocks_to_plain_text(html_to_blocks("# H\n\nA&#160;B **bold**"))
+    assert "\xa0" not in blocks_to_plain_text(html_to_blocks("# H\n\nA\xa0B **bold**"))
+
+
+# -- Table immediately after a prose line (no blank line) -----------------
+#
+# Regression coverage for a real reported bug: some tables rendered raw
+# ("| Column | Type | ..." showing up as literal text) while others in the
+# same document rendered fine. Root cause: Python-Markdown's `tables`
+# extension requires a table to start its own block — a sentence
+# immediately followed by the table's header row, with no blank line
+# between them, never gets recognized as a table at all.
+
+
+def test_html_to_blocks_renders_table_immediately_following_prose_with_no_blank_line():
+    md = (
+        "## A.1 ag_graph\n\n"
+        "Defines every property graph that exists in the PostgreSQL database.\n"
+        "| Column | Type | Req | Key | Notes |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| graphid | OID | Y | PK | Internal PostgreSQL object identifier for the graph. |\n"
+    )
+    blocks = html_to_blocks(md)
+    types = [b["type"] for b in blocks]
+    assert "table" in types
+
+    table_block = next(b for b in blocks if b["type"] == "table")
+    header_texts = [_run_texts(cell) for cell in table_block["rows"][0]]
+    assert header_texts == [["Column"], ["Type"], ["Req"], ["Key"], ["Notes"]]
+
+    # No literal pipe-table syntax survives anywhere in the output.
+    flat = blocks_to_plain_text(blocks)
+    assert "| Column | Type" not in flat
+    assert "| --- |" not in flat
+
+
+def test_html_to_blocks_does_not_add_a_spurious_blank_line_inside_an_already_correct_table():
+    md = "Intro.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+    blocks = html_to_blocks(md)
+    table_block = next(b for b in blocks if b["type"] == "table")
+    assert len(table_block["rows"]) == 2  # header + one data row, nothing split off
+
+
+def test_html_to_blocks_ordered_list_alone_is_detected_as_markdown():
+    """An ordered-list-only field (no headings/bold/table) previously fell
+    through detection entirely — _MD_WEAK_SIGNALS only recognized
+    unordered `-`/`*`/`+` markers, never `1.`/`2.` ones — combined with an
+    unordered sub-list, two distinct weak signals now correctly trigger.
+    """
+    md = "1. Introduction\n2. Objects\n    - 2.1 Sub-item\n3. Appendix\n"
+    blocks = html_to_blocks(md)
+    assert blocks[0]["type"] == "list"
+    assert blocks[0]["ordered"] is True
