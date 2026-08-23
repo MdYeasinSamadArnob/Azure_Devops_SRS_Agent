@@ -101,6 +101,37 @@ def _fix_loose_list_boundary_bug(text: str) -> str:
     return "\n".join(result)
 
 
+_TABLE_SEPARATOR_ROW_RE = _MD_STRONG_SIGNALS[0]  # the pipe-table separator row pattern, reused
+
+
+def _fix_missing_blank_line_before_table(text: str) -> str:
+    """Works around a real limitation in Python-Markdown's `tables`
+    extension (verified directly against its HTML output, not guessed): a
+    table must start its own block. A prose sentence immediately followed
+    by a table header row, with no blank line between them, never gets
+    recognized as a table at all — the whole thing (sentence + every pipe
+    -delimited row) comes out as one flat paragraph, with the `|` syntax
+    visible as literal text instead of a rendered table.
+
+    A header row is unambiguously identified by the line right after it
+    being a real separator row (`| --- | --- |`) — that pairing is exactly
+    GFM/Python-Markdown table syntax, not a guess. If the line before it is
+    non-blank and isn't itself a table row, insert the missing blank line.
+    Purely structural, not specific to any one document's wording — any
+    prose immediately followed by a table gets the same fix.
+    """
+    lines = text.split("\n")
+    result: list[str] = []
+    last = len(lines) - 1
+    for i, line in enumerate(lines):
+        is_header_row = "|" in line and i < last and _TABLE_SEPARATOR_ROW_RE.match(lines[i + 1])
+        prev_line = result[-1] if result else ""
+        if is_header_row and prev_line.strip() != "" and "|" not in prev_line:
+            result.append("")  # insert the missing blank line the table needs to be recognized
+        result.append(line)
+    return "\n".join(result)
+
+
 class _PlainTextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -493,7 +524,8 @@ def html_to_blocks(html: str | None) -> list[dict]:
     html = _normalize_nbsp_artifacts(html)
     is_markdown = _looks_like_markdown(html)
     if is_markdown:
-        html = markdown.markdown(_fix_loose_list_boundary_bug(html), extensions=["tables", "fenced_code"])
+        preprocessed = _fix_missing_blank_line_before_table(_fix_loose_list_boundary_bug(html))
+        html = markdown.markdown(preprocessed, extensions=["tables", "fenced_code"])
     parser = _BlockExtractor(headings_as_blocks=is_markdown)
     parser.feed(html)
     parser.close()

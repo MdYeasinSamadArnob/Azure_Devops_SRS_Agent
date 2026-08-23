@@ -451,6 +451,45 @@ def test_html_to_blocks_normalizes_numeric_and_decoded_nbsp_forms():
     assert "\xa0" not in blocks_to_plain_text(html_to_blocks("# H\n\nA\xa0B **bold**"))
 
 
+# -- Table immediately after a prose line (no blank line) -----------------
+#
+# Regression coverage for a real reported bug: some tables rendered raw
+# ("| Column | Type | ..." showing up as literal text) while others in the
+# same document rendered fine. Root cause: Python-Markdown's `tables`
+# extension requires a table to start its own block — a sentence
+# immediately followed by the table's header row, with no blank line
+# between them, never gets recognized as a table at all.
+
+
+def test_html_to_blocks_renders_table_immediately_following_prose_with_no_blank_line():
+    md = (
+        "## A.1 ag_graph\n\n"
+        "Defines every property graph that exists in the PostgreSQL database.\n"
+        "| Column | Type | Req | Key | Notes |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| graphid | OID | Y | PK | Internal PostgreSQL object identifier for the graph. |\n"
+    )
+    blocks = html_to_blocks(md)
+    types = [b["type"] for b in blocks]
+    assert "table" in types
+
+    table_block = next(b for b in blocks if b["type"] == "table")
+    header_texts = [_run_texts(cell) for cell in table_block["rows"][0]]
+    assert header_texts == [["Column"], ["Type"], ["Req"], ["Key"], ["Notes"]]
+
+    # No literal pipe-table syntax survives anywhere in the output.
+    flat = blocks_to_plain_text(blocks)
+    assert "| Column | Type" not in flat
+    assert "| --- |" not in flat
+
+
+def test_html_to_blocks_does_not_add_a_spurious_blank_line_inside_an_already_correct_table():
+    md = "Intro.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+    blocks = html_to_blocks(md)
+    table_block = next(b for b in blocks if b["type"] == "table")
+    assert len(table_block["rows"]) == 2  # header + one data row, nothing split off
+
+
 def test_html_to_blocks_ordered_list_alone_is_detected_as_markdown():
     """An ordered-list-only field (no headings/bold/table) previously fell
     through detection entirely — _MD_WEAK_SIGNALS only recognized
