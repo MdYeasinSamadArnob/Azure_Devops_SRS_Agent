@@ -17,7 +17,7 @@ interface JobEventPayload {
  * from the last event the server confirmed, not from scratch — the API's
  * job_events replay is what makes that safe.
  */
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+export const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 // Safety net: even with SSE auth working, a connection quietly dying over a
 // multi-hour job (proxy idle timeout, laptop sleep, container restart) with
 // no reconnect would otherwise freeze the UI forever with no way to notice.

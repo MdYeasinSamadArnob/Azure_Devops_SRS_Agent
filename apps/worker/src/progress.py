@@ -13,6 +13,7 @@ from typing import Any
 import redis
 from sqlalchemy.orm import Session
 from srs_core.db.models import GenerationJob, ImportJob, JobEvent
+from srs_core.progress_stages import progress_percent_for_stage
 
 from src.config import get_worker_settings
 
@@ -35,6 +36,9 @@ def report_stage(
     payload: dict[str, Any] | None = None,
     progress_percent: int | None = None,
 ) -> None:
+    if progress_percent is None:
+        progress_percent = progress_percent_for_stage(job_type, stage)
+
     model = ImportJob if job_type == "import" else GenerationJob
     job = session.get(model, job_id)
     if job is not None:

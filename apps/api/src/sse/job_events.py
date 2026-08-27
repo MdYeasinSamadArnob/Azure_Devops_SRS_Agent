@@ -13,6 +13,7 @@ from datetime import datetime
 import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from srs_core.progress_stages import progress_percent_for_stage
 
 from src.config import get_settings
 from src.database.models import GenerationJob, ImportJob, JobEvent
@@ -55,7 +56,11 @@ async def stream_job_events(
     for event in backlog:
         yield _format_sse(
             event.created_at.isoformat(),
-            {"stage": event.stage, "message": event.message, "progress_percent": None},
+            {
+                "stage": event.stage,
+                "message": event.message,
+                "progress_percent": progress_percent_for_stage(event.job_type, event.stage),
+            },
         )
 
     status = await _get_job_status(db, job_id)
