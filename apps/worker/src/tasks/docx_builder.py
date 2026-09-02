@@ -773,7 +773,17 @@ def resolve_document_title(context: dict) -> str:
     document_metadata = context.get("document_metadata") or {}
     roots = context.get("roots") or []
     epic_titles = [r["title"] for r in roots if r["work_item_type"] == "Epic"]
-    return document_metadata.get("app_name") or (epic_titles[0] if epic_titles else "SRS Document")
+    # "document_title" is the new-template field name (backlog task-6); "app_name"
+    # is this OLD template's own field, kept as a fallback so a request built
+    # against the new 11-field GenerationOptionsForm doesn't silently lose its
+    # title to the epic-title fallback while task-15's full template port is
+    # still pending. Drop the "app_name" half once that port lands and this
+    # function reads the new field set directly instead.
+    return (
+        document_metadata.get("app_name")
+        or document_metadata.get("document_title")
+        or (epic_titles[0] if epic_titles else "SRS Document")
+    )
 
 
 def build_srs_document(context: dict, minio) -> bytes:

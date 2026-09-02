@@ -16,23 +16,48 @@ const FORMAT_OPTIONS = [
   { key: "pdf" as const, label: "PDF", description: "Print-ready, requires DOCX render first" },
 ];
 
+// Matches the new SRS template's 1.1 Document Information table exactly
+// (11 fields - see docs/srs-content-mapping-spec.md and backlog task-6).
+// Every field is optional: nothing here is required to start a generation,
+// matching the template's own "leave it blank, fill in by hand later"
+// convention for anything not supplied.
 interface DocumentMetadata {
-  app_name: string;
-  version: string;
-  owner: string;
-  status: "Draft" | "Final";
-  revision_note: string;
-  footer_year: string;
+  document_id: string;
+  module_code: string;
+  document_title: string;
+  document_owner: string;
+  related_brd: string;
+  date_created: string;
+  date_submitted: string;
+  document_status: "Draft" | "Final";
+  document_version: string;
+  classification: string;
+  review_cycle: string;
+  // Not one of the 1.1 table's 11 fields, but the new template's cover
+  // page needs it (the old template has no equivalent).
+  client: string;
 }
 
 const DEFAULT_METADATA: DocumentMetadata = {
-  app_name: "",
-  version: "0.1",
-  owner: "",
-  status: "Draft",
-  revision_note: "Initial generation from Azure DevOps snapshot",
-  footer_year: new Date().getFullYear().toString(),
+  document_id: "",
+  module_code: "",
+  document_title: "",
+  document_owner: "",
+  related_brd: "",
+  date_created: "",
+  date_submitted: "",
+  document_status: "Draft",
+  document_version: "0.1",
+  classification: "CONFIDENTIAL",
+  review_cycle: "Per change or on stakeholder request",
+  client: "",
 };
+
+// "legacy" = the original org-template pipeline ("Generate Document").
+// "v2" = the new ERA_SRS_Template_V2.1 pipeline ("Generate Formatted SRS") -
+// a more organized document structure, still being built out section by
+// section (see backlog task-15 and the tasks it gates).
+type TemplateVersion = "legacy" | "v2";
 
 export function GenerationOptionsForm({
   snapshotId,
@@ -46,13 +71,15 @@ export function GenerationOptionsForm({
   const router = useRouter();
   const [formats, setFormats] = useState<{ docx: boolean; pdf: boolean }>({ docx: true, pdf: true });
   const [metadata, setMetadata] = useState<DocumentMetadata>(DEFAULT_METADATA);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  // Which button is in flight, if any - tracked per-version (not a plain
+  // boolean) so submitting one doesn't visually freeze the other button in
+  // its own "Starting generation…" label while its own click never fired.
+  const [submitting, setSubmitting] = useState<TemplateVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isSealed = snapshotStatus === "sealed";
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    setIsSubmitting(true);
+  async function handleSubmit(templateVersion: TemplateVersion) {
+    setSubmitting(templateVersion);
     setError(null);
     const selectedFormats = Object.entries(formats)
       .filter(([, checked]) => checked)
@@ -61,18 +88,19 @@ export function GenerationOptionsForm({
       const { job_id } = await apiClient.post<GenerateResponse>(`/snapshots/${snapshotId}/generate`, {
         formats: selectedFormats,
         document_metadata: metadata,
+        template_version: templateVersion,
       });
       router.push(`/projects/${projectId}/snapshots/${snapshotId}/jobs/${job_id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to start generation");
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(null);
     }
   }
 
   return (
     <Card className="max-w-xl">
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form onSubmit={(event) => event.preventDefault()} className="space-y-5">
         {!isSealed && (
           <p className="rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
             Generation is disabled until this snapshot is sealed (current status: {snapshotStatus}).
@@ -80,58 +108,112 @@ export function GenerationOptionsForm({
         )}
         <div className="space-y-4">
           <h3 className="text-sm font-medium text-ink">Document details</h3>
+          <p className="text-xs text-ink-faint">
+            Fills the Document Information table (section 1.1). Everything here is optional — anything left blank
+            stays as a placeholder in the generated document for you to fill in by hand.
+          </p>
           <TextField
-            label="App / product name"
-            id="doc-app-name"
-            required
+            label="Document title"
+            id="doc-title"
             placeholder="e.g. Loan Approval and Management System"
-            value={metadata.app_name}
-            onChange={(e) => setMetadata((m) => ({ ...m, app_name: e.target.value }))}
+            value={metadata.document_title}
+            onChange={(e) => setMetadata((m) => ({ ...m, document_title: e.target.value }))}
             helperText="Appears on the cover page, header, and Document Information table."
+          />
+          <TextField
+            label="Client"
+            id="doc-client"
+            placeholder="[Client Name] — [Department Name]"
+            value={metadata.client}
+            onChange={(e) => setMetadata((m) => ({ ...m, client: e.target.value }))}
+            helperText="Cover page only — not part of the Document Information table."
           />
           <div className="grid grid-cols-2 gap-3">
             <TextField
-              label="Document version"
-              id="doc-version"
-              value={metadata.version}
-              onChange={(e) => setMetadata((m) => ({ ...m, version: e.target.value }))}
+              label="Document ID"
+              id="doc-id"
+              placeholder="[ProjectCode]_SRS_[MN-XXX]_V0.1"
+              value={metadata.document_id}
+              onChange={(e) => setMetadata((m) => ({ ...m, document_id: e.target.value }))}
             />
+            <TextField
+              label="Module code"
+              id="doc-module-code"
+              placeholder="MN-XXX"
+              value={metadata.module_code}
+              onChange={(e) => setMetadata((m) => ({ ...m, module_code: e.target.value }))}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <TextField
+              label="Document owner"
+              id="doc-owner"
+              placeholder="Name, Role, Organization"
+              value={metadata.document_owner}
+              onChange={(e) => setMetadata((m) => ({ ...m, document_owner: e.target.value }))}
+            />
+            <TextField
+              label="Related BRD"
+              id="doc-related-brd"
+              placeholder="[ProjectCode]_BRD_[MN-XXX]_Vx.x"
+              value={metadata.related_brd}
+              onChange={(e) => setMetadata((m) => ({ ...m, related_brd: e.target.value }))}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <TextField
+              label="Date created"
+              id="doc-date-created"
+              type="date"
+              value={metadata.date_created}
+              onChange={(e) => setMetadata((m) => ({ ...m, date_created: e.target.value }))}
+            />
+            <TextField
+              label="Date submitted"
+              id="doc-date-submitted"
+              type="date"
+              value={metadata.date_submitted}
+              onChange={(e) => setMetadata((m) => ({ ...m, date_submitted: e.target.value }))}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label htmlFor="doc-status" className="block text-sm font-medium text-ink">
                 Document status
               </label>
               <select
                 id="doc-status"
-                value={metadata.status}
-                onChange={(e) => setMetadata((m) => ({ ...m, status: e.target.value as "Draft" | "Final" }))}
+                value={metadata.document_status}
+                onChange={(e) =>
+                  setMetadata((m) => ({ ...m, document_status: e.target.value as "Draft" | "Final" }))
+                }
                 className="w-full rounded-md border border-line-strong bg-surface-raised px-3 py-2.5 text-sm text-ink transition-colors duration-150 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
               >
                 <option value="Draft">Draft</option>
                 <option value="Final">Final</option>
               </select>
             </div>
+            <TextField
+              label="Document version"
+              id="doc-version"
+              value={metadata.document_version}
+              onChange={(e) => setMetadata((m) => ({ ...m, document_version: e.target.value }))}
+            />
           </div>
-          <TextField
-            label="Document owner / prepared by"
-            id="doc-owner"
-            placeholder="Optional"
-            value={metadata.owner}
-            onChange={(e) => setMetadata((m) => ({ ...m, owner: e.target.value }))}
-          />
-          <TextField
-            label="Revision note"
-            id="doc-revision-note"
-            value={metadata.revision_note}
-            onChange={(e) => setMetadata((m) => ({ ...m, revision_note: e.target.value }))}
-            helperText="Seeds the first row of the Document History table."
-          />
-          <TextField
-            label="Footer copyright year"
-            id="doc-footer-year"
-            value={metadata.footer_year}
-            onChange={(e) => setMetadata((m) => ({ ...m, footer_year: e.target.value }))}
-            helperText="Shown in the page footer: “Copyright © {year} ERA Info Tech Ltd.”"
-          />
+          <div className="grid grid-cols-2 gap-3">
+            <TextField
+              label="Classification"
+              id="doc-classification"
+              value={metadata.classification}
+              onChange={(e) => setMetadata((m) => ({ ...m, classification: e.target.value }))}
+            />
+            <TextField
+              label="Review cycle"
+              id="doc-review-cycle"
+              value={metadata.review_cycle}
+              onChange={(e) => setMetadata((m) => ({ ...m, review_cycle: e.target.value }))}
+            />
+          </div>
         </div>
         <div className="space-y-2">
           {FORMAT_OPTIONS.map((option) => (
@@ -158,12 +240,29 @@ export function GenerationOptionsForm({
             {error}
           </p>
         )}
-        <Button
-          type="submit"
-          disabled={!isSealed || isSubmitting || (!formats.docx && !formats.pdf) || !metadata.app_name.trim()}
-        >
-          {isSubmitting ? "Starting generation…" : "Generate document"}
-        </Button>
+        <div className="space-y-2">
+          <Button
+            type="button"
+            onClick={() => handleSubmit("legacy")}
+            disabled={!isSealed || submitting !== null || (!formats.docx && !formats.pdf)}
+            className="w-full"
+          >
+            {submitting === "legacy" ? "Starting generation…" : "Generate Document"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => handleSubmit("v2")}
+            disabled={!isSealed || submitting !== null || (!formats.docx && !formats.pdf)}
+            className="w-full"
+          >
+            {submitting === "v2" ? "Starting generation…" : "Generate Formatted SRS"}
+          </Button>
+          <p className="text-xs text-ink-faint">
+            “Generate Formatted SRS” produces the new, more organized SRS template — currently covers the cover
+            page, header/footer, table of contents, and Document Control section; the rest is still being built out.
+          </p>
+        </div>
       </form>
     </Card>
   );

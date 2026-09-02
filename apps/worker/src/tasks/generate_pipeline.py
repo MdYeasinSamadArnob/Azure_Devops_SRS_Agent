@@ -44,6 +44,7 @@ from src.db import session_scope
 from src.progress import mark_failed, report_stage
 from src.storage_helpers import upload_with_fallback
 from src.tasks.docx_builder import build_srs_document, resolve_document_title
+from src.tasks.srs_v2_builder import build_srs_document_v2
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +170,12 @@ def _build_hierarchy_tree(items: list[Any], assets_by_item: dict[str, list[dict]
 
 @celery_app.task(name="src.tasks.generate_pipeline.normalize_content", bind=True, max_retries=2)
 def normalize_content(
-    self, generation_job_id: str, snapshot_id: str, formats: list[str], document_metadata: dict[str, str] | None = None
+    self,
+    generation_job_id: str,
+    snapshot_id: str,
+    formats: list[str],
+    document_metadata: dict[str, str] | None = None,
+    template_version: str = "legacy",
 ) -> dict[str, Any]:
     from srs_core.db.models import Asset, GenerationJob, OrgBrandingSettings, SnapshotWorkItem, SourceSnapshot
 
@@ -249,6 +255,11 @@ def normalize_content(
                 "logo_override": logo_override,
                 "total_count": len(items),
                 "roots": roots,
+                # "legacy" (default) = the original org-template pipeline
+                # ("Generate Document"); "v2" = the new ERA_SRS_Template_V2.1
+                # pipeline ("Generate Formatted SRS") - see render_docx's
+                # branch and backlog task-15.
+                "template_version": template_version,
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("normalize_content failed for job %s", generation_job_id)
@@ -256,19 +267,52 @@ def normalize_content(
             raise
 
 
+def _build_epic_grounding_bullets(context: dict[str, Any]) -> list[str]:
+    """Shared grounding text for every LLM call in this stage — the Epic
+    list (falling back to whatever roots exist if there are no Epics),
+    each with a description snippet and a short excerpt of any custom
+    requirement-content fields (Business Rules, Functional/Non-Functional
+    Requirements, ...) this org's process template carries outside the
+    standard Description field.
+    """
+    epics = [r for r in context["roots"] if r["work_item_type"] == "Epic"]
+    source_items = (epics or context["roots"])[:MAX_EPICS_IN_LLM_PROMPT]
+    bullet_lines = []
+    for item in source_items:
+        description_text = blocks_to_plain_text(item.get("description_blocks") or [])
+        line = f"- {item['title']}: {description_text[:300]}"
+        for section in item.get("content_sections", [])[:5]:
+            snippet = blocks_to_plain_text(section.get("blocks") or [])[:200]
+            if snippet:
+                line += f"\n  {section['label']}: {snippet}"
+        bullet_lines.append(line)
+    return bullet_lines
+
+
+_LLM_SYSTEM_PROMPT = "You are a technical writer producing a professional Software Requirements Specification document."
+
+
 @celery_app.task(name="src.tasks.generate_pipeline.run_llm_rules", bind=True, max_retries=1)
 def run_llm_rules(self, context: dict[str, Any]) -> dict[str, Any]:
-    """Optional AI enhancement: a short, grounded Introduction section
-    generated from the Epic list. Never fails the chain — a slow,
-    unreachable, or misconfigured LLM must never block document generation;
-    it just means the Introduction falls back to the deterministic default
-    in docx_builder. Clearly marked as AI-generated in the rendered output
-    per the "controlled enhancement" principle — it augments, never
-    replaces, the SOURCE_EXTRACTED technical content (titles/IDs/state are
-    always the raw Azure data, verbatim, everywhere in the document).
+    """Optional AI enhancement. Never fails the chain — a slow, unreachable,
+    or misconfigured LLM must never block document generation; it just
+    means the affected section(s) fall back to their deterministic default.
+    Clearly marked as AI-generated in the rendered output per the
+    "controlled enhancement" principle — it augments, never replaces, the
+    SOURCE_EXTRACTED technical content (titles/IDs/state are always the raw
+    Azure data, verbatim, everywhere in the document).
+
+    Legacy pipeline: a short, grounded Introduction section (ai_introduction).
+    v2 pipeline (backlog task-17): a brief 2.2 Scope statement and a brief
+    3.1 Solution Overview paragraph (v2_scope / v2_solution_overview) - two
+    separate prompts, not the same text reused twice, since the two
+    sections ask different questions (scope boundaries vs. what the module
+    does) even though both are "brief LLM synthesis from the same source".
     """
     generation_job_id = context["generation_job_id"]
     context["ai_introduction"] = None
+    context["v2_scope"] = None
+    context["v2_solution_overview"] = None
 
     with session_scope() as session:
         report_stage(session, job_id=generation_job_id, job_type="generate", stage="running_llm_rules")
@@ -276,44 +320,46 @@ def run_llm_rules(self, context: dict[str, Any]) -> dict[str, Any]:
     try:
         adapter = get_default_adapter()
         if adapter is None:
-            logger.info("no LLM configured (MODEL_NAME unset) — skipping AI introduction")
+            logger.info("no LLM configured (MODEL_NAME unset) — skipping AI-generated sections")
             return context
 
-        epics = [r for r in context["roots"] if r["work_item_type"] == "Epic"]
-        source_items = (epics or context["roots"])[:MAX_EPICS_IN_LLM_PROMPT]
-        if not source_items:
+        bullet_lines = _build_epic_grounding_bullets(context)
+        if not bullet_lines:
             return context
+        backlog_text = "The following are Epics from a software project's Azure DevOps backlog:\n\n" + "\n".join(bullet_lines)
 
-        bullet_lines = []
-        for item in source_items:
-            description_text = blocks_to_plain_text(item.get("description_blocks") or [])
-            line = f"- {item['title']}: {description_text[:300]}"
-            # This org's process template (and often others) puts real
-            # requirement content in custom fields — Business Rules,
-            # Functional/Non-Functional Requirements, etc. — not just the
-            # standard Description field. Fold a short snippet of each into
-            # the grounding so the introduction reflects that content too.
-            for section in item.get("content_sections", [])[:5]:
-                snippet = blocks_to_plain_text(section.get("blocks") or [])[:200]
-                if snippet:
-                    line += f"\n  {section['label']}: {snippet}"
-            bullet_lines.append(line)
-        prompt = (
-            "The following are Epics from a software project's Azure DevOps backlog:\n\n"
-            + "\n".join(bullet_lines)
-            + "\n\nWrite a concise, professional 2-3 paragraph Introduction section for a "
-            "Software Requirements Specification document, summarizing the overall purpose and "
-            "scope of this system based ONLY on the epics listed above. Do not invent features "
-            "not implied by the list. Do not use markdown formatting or headings — plain "
-            "paragraphs only."
-        )
-        context["ai_introduction"] = adapter.complete(
-            prompt,
-            system="You are a technical writer producing a professional Software Requirements Specification document.",
-            max_tokens=500,
-        )
+        if context.get("template_version") == "v2":
+            context["v2_scope"] = adapter.complete(
+                backlog_text
+                + "\n\nIn 2-3 sentences, write a Scope statement for a Software Requirements Specification "
+                "document: which module/feature/process this SRS covers, based ONLY on the epics listed "
+                "above. Do not invent anything not implied by the list. Plain sentences only, no "
+                "markdown, no headings.",
+                system=_LLM_SYSTEM_PROMPT,
+                max_tokens=200,
+            )
+            context["v2_solution_overview"] = adapter.complete(
+                backlog_text
+                + "\n\nWrite a brief Solution Overview paragraph for a Software Requirements Specification "
+                "document: describe the module in business terms — what it automates, which process it "
+                "supports, and the value it delivers — based ONLY on the epics listed above. Do not "
+                "invent anything not implied by the list. Plain paragraph only, no markdown, no headings.",
+                system=_LLM_SYSTEM_PROMPT,
+                max_tokens=250,
+            )
+        else:
+            context["ai_introduction"] = adapter.complete(
+                backlog_text
+                + "\n\nWrite a concise, professional 2-3 paragraph Introduction section for a "
+                "Software Requirements Specification document, summarizing the overall purpose and "
+                "scope of this system based ONLY on the epics listed above. Do not invent features "
+                "not implied by the list. Do not use markdown formatting or headings — plain "
+                "paragraphs only.",
+                system=_LLM_SYSTEM_PROMPT,
+                max_tokens=500,
+            )
     except Exception:  # noqa: BLE001 — AI enhancement is always optional
-        logger.warning("run_llm_rules failed, continuing without AI introduction", exc_info=True)
+        logger.warning("run_llm_rules failed, continuing without AI-generated sections", exc_info=True)
 
     return context
 
@@ -328,7 +374,10 @@ def render_docx(self, context: dict[str, Any]) -> dict[str, Any]:
             report_stage(session, job_id=generation_job_id, job_type="generate", stage="rendering_docx")
 
             minio = _get_minio_client()
-            docx_bytes = build_srs_document(context, minio)
+            if context.get("template_version") == "v2":
+                docx_bytes = build_srs_document_v2(context, minio)
+            else:
+                docx_bytes = build_srs_document(context, minio)
             title = resolve_document_title(context)
             context["document_title"] = title
 
@@ -375,6 +424,8 @@ def render_docx(self, context: dict[str, Any]) -> dict[str, Any]:
             context["docx_object_key"] = docx_key
             context.pop("roots")  # no longer needed downstream, keeps the chain payload small
             context.pop("ai_introduction", None)
+            context.pop("v2_scope", None)
+            context.pop("v2_solution_overview", None)
             return context
         except Exception as exc:  # noqa: BLE001
             logger.exception("render_docx failed for job %s", generation_job_id)

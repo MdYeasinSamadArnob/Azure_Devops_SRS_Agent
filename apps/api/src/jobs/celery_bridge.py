@@ -34,18 +34,28 @@ def enqueue_seal_pipeline(*, import_job_id: str, snapshot_id: str, connection_id
 
 
 def enqueue_generate_pipeline(
-    *, generation_job_id: str, snapshot_id: str, formats: list[str], document_metadata: dict[str, str] | None = None
+    *,
+    generation_job_id: str,
+    snapshot_id: str,
+    formats: list[str],
+    document_metadata: dict[str, str] | None = None,
+    template_version: str = "legacy",
 ) -> str:
     """Builds the GENERATE chain by task name (the API never imports worker
     task code) with each stage's queue set explicitly — convert_pdf is the
     only stage on the isolated `conversion` queue, so a hung/heavy
     LibreOffice process can never starve normalization or DOCX rendering.
+
+    `template_version`: "legacy" (default) for the original org-template
+    pipeline ("Generate Document"), "v2" for the new ERA_SRS_Template_V2.1
+    pipeline ("Generate Formatted SRS") — see generate_pipeline.py's
+    render_docx and backlog task-15.
     """
     app = get_celery_client()
     workflow = chain(
         signature(
             "src.tasks.generate_pipeline.normalize_content",
-            args=(generation_job_id, snapshot_id, formats, document_metadata or {}),
+            args=(generation_job_id, snapshot_id, formats, document_metadata or {}, template_version),
             app=app,
             queue="document",
         ),
