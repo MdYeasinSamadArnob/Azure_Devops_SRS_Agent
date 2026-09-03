@@ -28,7 +28,7 @@ packages/
   contracts/        Reserved for generated API types once the OpenAPI schema stabilizes
 infra/
   docker/           Postgres/MinIO init scripts used by docker-compose
-templates/           Example .docx template(s) used as the base for generated documents
+templates/           .docx template(s) used as the base for generated documents (one is proprietary and supplied separately — see "Template setup" below)
 ```
 
 Data flow: **Azure DevOps → import pipeline → Postgres (draft snapshot) → user curation → sealed snapshot → generate pipeline → DOCX/PDF in MinIO**. Source attachments and generated documents are both content-addressed objects in MinIO; a "reselect & regenerate" forks a new snapshot and copies assets forward via a server-side MinIO copy — it never re-downloads from Azure DevOps.
@@ -54,6 +54,18 @@ cd srs_agent
 cp .env.example .env      # edit values — see comments in the file
 docker compose up -d
 ```
+
+### Template setup (required for "Generate Formatted SRS")
+
+The newer, more structured document pipeline ("Generate Formatted SRS" in the UI) renders onto `templates/ERA_SRS_Template_V2.1.docx` — ERA InfoTech's own branded SRS template. It's proprietary and **not included in this open-source repository**; the file is handed out separately (ask a maintainer). Place it at exactly:
+
+```
+templates/ERA_SRS_Template_V2.1.docx
+```
+
+before running `docker compose build worker-document` (or `docker compose up -d --build`) — the worker image copies whatever's in `templates/` at build time, so the file must be in place first. Without it, every other feature works normally; only "Generate Formatted SRS" jobs fail (cleanly, with a clear error) until the template is added and the image is rebuilt.
+
+The original "Generate Document" pipeline's template (`templates/main_template_SRS-Customer-BankAsiaSmartApp-V0.5.8.docx`) already ships in the repo, so no extra setup is needed for it.
 
 - Web app: http://localhost:3010
 - API: http://localhost:8010

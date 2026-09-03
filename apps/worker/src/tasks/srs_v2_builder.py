@@ -21,7 +21,6 @@ text for everything this module doesn't touch.
 
 from __future__ import annotations
 
-import copy
 import logging
 import re
 from datetime import date, datetime
@@ -34,10 +33,11 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, RGBColor
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 from srs_core.rendering.html_text import blocks_to_plain_text
 
-from src.tasks.docx_builder import resolve_document_title
+from src.tasks.docx_builder import _render_blocks, resolve_document_title
 
 logger = logging.getLogger(__name__)
 
@@ -440,19 +440,18 @@ PARA_2_1_PURPOSE = 32
 PARA_2_2_SCOPE = 34
 # 2.4's 4 sample bullet paragraphs (backlog task-19) - REMOVING 3 of them
 # shifts every later paragraph index down by 3, so anything below index 41
-# (namely 3.1 at 50, 3.2 at 52, 3.3 at 55-57, 3.5 at 61-62) MUST be
-# read/written before this range is touched.
+# (namely 3.1 at 50, 3.2 at 52) MUST be read/written before this range is
+# touched.
 PARA_2_4_REFERENCES_FIRST = 38
 PARA_2_4_REFERENCES_COUNT = 4
 PARA_3_1_SOLUTION_OVERVIEW = 50
 PARA_3_2_PROCESS_OVERVIEW = 52
-PARA_3_3_DEPENDENCIES_FIRST = 55
-PARA_3_3_DEPENDENCIES_COUNT = 3
-PARA_3_5_ASSUMPTIONS_FIRST = 61
-PARA_3_5_ASSUMPTIONS_COUNT = 2
-# 3.4/3.6 are TABLES (indices 5/6 in document.tables), not paragraphs -
-# unaffected by 2.4's paragraph-removal, handled alongside the other tables
-# in build_srs_document_v2 instead of here.
+# 3.3/3.5 (backlog task-34) and 3.4/3.6 (TABLES - indices 5/6 in
+# document.tables) are no longer hardcoded-index paragraphs at all - 3.3/3.5
+# are now located by heading TEXT (see _replace_section_body) since their
+# per-Epic-grouped content has no fixed length to reserve a PARA_* count
+# for, and 3.4/3.6 are handled alongside the other tables in
+# build_srs_document_v2 instead of here.
 
 
 def _set_placeholder_paragraph_text(document: Document, index: int, text: str | None) -> None:
@@ -506,7 +505,14 @@ def _clear_bullet_list_to_one_empty_item(document: Document, first_index: int, c
 
 _DEPENDENCIES_LABEL_RE = re.compile(r"depend", re.IGNORECASE)
 _ROLES_LABEL_RE = re.compile(r"role|persona", re.IGNORECASE)
-_ASSUMPTIONS_LABEL_RE = re.compile(r"assumption|constraint", re.IGNORECASE)
+# Deliberately just "assumption" (backlog task-34), NOT "assumption|constraint"
+# - if an org keeps Assumptions and Constraints as two SEPARATE fields, this
+# must not also match the Constraints-only one; per user direction
+# (2026-09-03), only Assumptions belongs in 3.5. If instead an org combines
+# both into one "Assumptions and Constraints" field, this still finds it
+# (the label still contains "assumption") - _epic_assumptions_blocks then
+# does a best-effort CONTENT-level split to drop the Constraints portion.
+_ASSUMPTIONS_LABEL_RE = re.compile(r"assumption", re.IGNORECASE)
 # "Out of Scope" has 4 characters (" of ") between "out" and "scope" - a
 # {0,3} bound here was a real bug caught in testing: it silently matched
 # nothing against the template's own field label. {0,8} covers that plus
@@ -514,85 +520,236 @@ _ASSUMPTIONS_LABEL_RE = re.compile(r"assumption|constraint", re.IGNORECASE)
 _OUT_OF_SCOPE_LABEL_RE = re.compile(r"out.{0,8}scope", re.IGNORECASE)
 
 
-def _collect_epic_content_lines(context: dict, label_pattern: re.Pattern[str]) -> list[str]:
-    """One line per bullet/list-item/paragraph found in every Epic's
-    content_sections whose label matches `label_pattern` - reuses
-    blocks_to_plain_text's existing one-item-per-line behavior (list items,
-    table rows, and paragraphs each already land on their own line) rather
-    than re-walking the block structure.
+# ---------------------------------------------------------------------------
+# 3.3-3.6 - per-Epic grouped, native-shape rendering (backlog task-34/35,
+# replacing task-22's flat-merged-list/fixed-table approach entirely)
+#
+# All four are narrative sections where, with multiple Epics selected, a
+# single list/table merging every Epic's own content together loses which
+# item belongs to which Epic. Each gets its own "Epic - [Name]:" group
+# instead, located by heading TEXT (not a hardcoded paragraph index - see
+# _replace_section_body) since a per-Epic group's length varies with however
+# much content that one Epic actually has - and each Epic's own content is
+# rendered in whatever native shape Azure actually has it in (a numbered
+# list, or one of several different real table shapes), not forced into a
+# fixed set of columns the template happened to ship as a worked example.
+# ---------------------------------------------------------------------------
+
+
+def _replace_section_body(document: Document, start_heading_text: str, end_heading_text: str, build_fn) -> None:
+    """Removes every paragraph/table between (not including) the heading
+    `start_heading_text` and the heading `end_heading_text`, then inserts
+    freshly built content right before `end_heading_text` - the same
+    scratch-document-transplant technique _apply_section_5 established (see
+    its own docstring: python-docx's add_paragraph()/add_table() only ever
+    append to the END of a document, so new content is built in a throwaway
+    Document() and each of its top-level body elements is moved into the
+    real one via addprevious()).
+
+    Locating by heading TEXT rather than a hardcoded paragraph index means
+    this is immune to every earlier section's own dynamic-length edits, and
+    never needs re-measuring the way a hardcoded PARA_* index would if the
+    template's layout ever changes (see backlog task-32's index-re-measuring
+    follow-up, which this technique avoids repeating for 3.3/3.5 going
+    forward).
+
+    `build_fn(scratch: Document)` populates the scratch document using its
+    normal add_paragraph()/add_table() API.
     """
-    roots = context.get("roots") or []
-    epics = [r for r in roots if r.get("work_item_type") == "Epic"]
-    lines: list[str] = []
+    start_heading = _find_paragraph(document, start_heading_text)
+    end_heading = _find_paragraph(document, end_heading_text)
+
+    body = document.element.body
+    to_remove = []
+    collecting = False
+    for child in body.iterchildren():
+        if child is start_heading._p:
+            collecting = True
+            continue
+        if child is end_heading._p:
+            break
+        if collecting:
+            to_remove.append(child)
+    for element in to_remove:
+        body.remove(element)
+
+    scratch = Document()
+    build_fn(scratch)
+
+    anchor = end_heading._p
+    for element in list(scratch.element.body.iterchildren()):
+        if element.tag == qn("w:sectPr"):
+            continue
+        anchor.addprevious(element)
+
+
+# A short, standalone marker line acting as an internal section boundary
+# within a bigger multi-topic field - backlog task-35 (2026-09-03 real-data
+# report, Epic 118802): Dependencies/User Roles/Assumptions/Out of Scope
+# turned out NOT to be dedicated custom fields at all. Each Epic's own
+# standard Description field ("Details" tab) and the same custom field
+# already matched for section 6's NFRs ("Analysis" tab, backlog task-27)
+# both turned out to be ONE long document internally divided into many
+# named subsections via short standalone lines - "Dependencies", "Out of
+# Scope", "User Persona", "Assumptions", but ALSO others we don't target
+# ("B. Cheque Collection Rules", "Integration Requirements", "Business
+# Process Diagram", numbered "FRxx." functional-requirement lines) - so a
+# marker has to be recognized generically (short, no sentence-ending
+# punctuation), not just by matching our own known keyword list, or the
+# NEXT unrelated subsection wouldn't be recognized as the end boundary of
+# the one we DO want.
+_SECTION_MARKER_MAX_LENGTH = 60
+
+
+def _block_marker_text(block: dict) -> str:
+    if block.get("type") in ("text", "heading"):
+        return _runs_to_text(block.get("runs") or []).strip()
+    return ""
+
+
+def _is_section_marker_block(block: dict) -> bool:
+    text = _block_marker_text(block)
+    if not text or len(text) > _SECTION_MARKER_MAX_LENGTH:
+        return False
+    return not text.rstrip().endswith((".", ":", ";", ","))
+
+
+def _named_subsection_blocks(blocks: list[dict], target_pattern: re.Pattern[str]) -> list[dict]:
+    """Extracts the blocks belonging to ONE named subsection (e.g.
+    "Dependencies", "Out of Scope", "Assumptions", "User Persona") from
+    inside a bigger field's own blocks (see _SECTION_MARKER_MAX_LENGTH's
+    comment above for why real Azure content needs this at all).
+
+    Finds the FIRST block whose own text matches `target_pattern` AND
+    looks like a section-marker line (_is_section_marker_block), then
+    collects every block after it up to the NEXT marker-like block
+    (whatever subsection THAT one starts, known or not) or the end of the
+    field, whichever comes first. Returns [] if no such marker is found.
+    """
+    for i, block in enumerate(blocks):
+        text = _block_marker_text(block)
+        if text and target_pattern.search(text) and _is_section_marker_block(block):
+            collected: list[dict] = []
+            for later in blocks[i + 1 :]:
+                if _is_section_marker_block(later):
+                    break
+                collected.append(later)
+            return collected
+    return []
+
+
+def _epic_details_subsection_blocks(epic: dict, target_pattern: re.Pattern[str]) -> list[dict]:
+    """Dependencies (3.3) / Out of Scope (3.6) - backlog task-35: both live
+    as named subsections inside the Epic's own standard Description field
+    (the "Details" tab), found via description_blocks directly rather than
+    content_sections (which deliberately excludes System.Description - see
+    srs_core.parsing.custom_fields' own _EXPLICITLY_HANDLED). Falls back to
+    matching a whole DEDICATED field by its own label (backlog task-22's
+    original approach) if no such subsection is found there, in case a
+    different org really does keep one of these as its own separate field.
+    """
+    found = _named_subsection_blocks(epic.get("description_blocks") or [], target_pattern)
+    if found:
+        return found
+    return _matching_content_section_blocks(epic, target_pattern)
+
+
+def _epic_analysis_subsection_blocks(epic: dict, target_pattern: re.Pattern[str]) -> list[dict]:
+    """User Roles/Personas (3.4) / Assumptions (3.5) - backlog task-35:
+    both live as named subsections inside the SAME "Analysis tab" custom
+    field already matched for section 6's NFRs (_ANALYSIS_TAB_LABEL_RE,
+    backlog task-27), not a dedicated field of their own. Same
+    dedicated-field fallback as _epic_details_subsection_blocks.
+    """
+    analysis_blocks = _matching_content_section_blocks(epic, _ANALYSIS_TAB_LABEL_RE)
+    found = _named_subsection_blocks(analysis_blocks, target_pattern)
+    if found:
+        return found
+    return _matching_content_section_blocks(epic, target_pattern)
+
+
+def _build_epic_grouped_body(scratch: Document, epics: list[dict], get_blocks, minio) -> None:
+    """Shared per-Epic-grouped, native-Azure-shape-preserving renderer for
+    3.3/3.4/3.5/3.6 (backlog task-34/35) - one "Epic - [Name]:" bold
+    paragraph per Epic followed by that Epic's own matching content
+    (`get_blocks(epic)`), rendered as-is (list stays a list, table stays a
+    table) via docx_builder._render_blocks rather than flattened to plain
+    bullets. "[Empty]" (no Epic heading) if there's no Azure data at all -
+    never leaves the template's own bracketed sample text in a generated
+    document.
+    """
+    any_content = False
     for epic in epics:
-        for section in epic.get("content_sections") or []:
-            if label_pattern.search(section.get("label") or ""):
-                text = blocks_to_plain_text(section.get("blocks") or [])
-                lines.extend(line.strip() for line in text.split("\n") if line.strip())
-    return lines
+        blocks = get_blocks(epic)
+        if not blocks:
+            continue
+        any_content = True
+        heading = scratch.add_paragraph()
+        heading.add_run(f"Epic - {epic.get('title') or ''}:").bold = True
+        _render_blocks(scratch, blocks, minio=minio, assets=[], used_object_keys=set())
+    if not any_content:
+        scratch.add_paragraph("[Empty]", style="List Bullet")
 
 
-def _render_bullets_at(document: Document, first_index: int, sample_count: int, lines: list[str]) -> None:
-    """3.3/3.5 - backlog task-22: replaces the template's `sample_count`
-    bracketed sample bullets starting at `first_index` with real content
-    (one bullet per line), growing or shrinking the list to fit - a
-    template shipping 3 sample bullets doesn't mean every real Epic has
-    exactly 3 dependencies. Falls back to the same single-empty-bullet
-    "manual placeholder" treatment as task-19 if no matching Azure content
-    was found for any Epic in the selection.
+def _apply_dependencies_section(document: Document, epics: list[dict], minio) -> None:
+    """3.3 Dependencies with Other Modules / Systems - backlog task-34/35."""
+    _replace_section_body(
+        document,
+        "3.3 Dependencies with Other Modules / Systems",
+        "3.4 User Roles / Personas",
+        lambda scratch: _build_epic_grouped_body(
+            scratch, epics, lambda e: _epic_details_subsection_blocks(e, _DEPENDENCIES_LABEL_RE), minio
+        ),
+    )
+
+
+def _apply_roles_section(document: Document, epics: list[dict], minio) -> None:
+    """3.4 User Roles / Personas - backlog task-35: was a fixed-column
+    table (Role/Persona | Responsibility | Decision Authority) that never
+    matched what Azure actually has (an Attribute | Description "User
+    Persona" table) - reworked to the same per-Epic-grouped, native-shape
+    approach as 3.3/3.5, replacing that table entirely rather than leaving
+    it sitting empty alongside the real content.
     """
-    if not lines:
-        _clear_bullet_list_to_one_empty_item(document, first_index, sample_count)
-        return
-
-    anchor = document.paragraphs[first_index]
-    sample_paragraphs = [document.paragraphs[first_index + i] for i in range(sample_count)]
-    _set_placeholder_paragraph_text(document, first_index, lines[0])
-
-    insert_after = anchor._p
-    for line in lines[1:]:
-        new_p = copy.deepcopy(anchor._p)
-        for run_element in new_p.findall(qn("w:r")):
-            new_p.remove(run_element)
-        Paragraph(new_p, document).add_run(line)
-        insert_after.addnext(new_p)
-        insert_after = new_p
-
-    # Leftover original sample bullets beyond the first are no longer
-    # needed - remove by their own element reference (captured before any
-    # insertion above), safe regardless of how many clones were inserted.
-    for p in sample_paragraphs[1:]:
-        p._element.getparent().remove(p._element)
+    _replace_section_body(
+        document,
+        "3.4 User Roles / Personas",
+        "3.5 Assumptions and Constraints",
+        lambda scratch: _build_epic_grouped_body(
+            scratch, epics, lambda e: _epic_analysis_subsection_blocks(e, _ROLES_LABEL_RE), minio
+        ),
+    )
 
 
-def _populate_azure_sourced_table(table, lines: list[str], *, content_col: int = 0) -> None:
-    """3.4/3.6 - backlog task-22: puts each Azure-sourced line into the
-    table's primary content column (SL, if the table has one at column 0,
-    auto-increments; every other column - e.g. 3.4's "Decision Authority",
-    3.6's "Description" - is left blank for manual completion, since
-    reliably splitting free-text Azure content into those judgment-call
-    columns isn't something a fixed heuristic can do, and the exact source
-    field shape is still unconfirmed). Resizes the table to fit, same
-    reuse-then-add-then-trim pattern as _populate_definitions_table
-    (backlog task-18). Falls back to the template's own blank-shape
-    treatment (backlog task-7's precedent) if no matching content was found.
+def _apply_assumptions_section(document: Document, epics: list[dict], minio) -> None:
+    """3.5 Assumptions and Constraints - backlog task-34/35: only the
+    Assumptions portion (Constraints, if the same field ever has its own
+    marker for it, is dropped - see _named_subsection_blocks stopping at
+    the next marker-like line either way)."""
+    _replace_section_body(
+        document,
+        "3.5 Assumptions and Constraints",
+        "3.6 Out of Scope",
+        lambda scratch: _build_epic_grouped_body(
+            scratch, epics, lambda e: _epic_analysis_subsection_blocks(e, _ASSUMPTIONS_LABEL_RE), minio
+        ),
+    )
+
+
+def _apply_out_of_scope_section(document: Document, epics: list[dict], minio) -> None:
+    """3.6 Out of Scope - backlog task-35: was a fixed-column table
+    (SL | Item | Description) that never matched what Azure actually has
+    (an ID | Out of Scope Item | Description table) - reworked to the same
+    per-Epic-grouped, native-shape approach as the rest of this section.
     """
-    if not lines:
-        blank_table_data_rows(table)
-        return
-
-    data_rows = table.rows[1:]
-    has_sl_column = content_col == 1
-    for i, line in enumerate(lines):
-        row = data_rows[i] if i < len(data_rows) else table.add_row()
-        if has_sl_column:
-            row.cells[0].text = str(i + 1)
-        row.cells[content_col].text = line
-        for extra_col in range(content_col + 1, len(row.cells)):
-            row.cells[extra_col].text = ""
-
-    for row in data_rows[len(lines):]:
-        row._tr.getparent().remove(row._tr)
+    _replace_section_body(
+        document,
+        "3.6 Out of Scope",
+        "4. Feature Catalogue",
+        lambda scratch: _build_epic_grouped_body(
+            scratch, epics, lambda e: _epic_details_subsection_blocks(e, _OUT_OF_SCOPE_LABEL_RE), minio
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +767,17 @@ _FEATURE_ID_PREFIX = "FEAT"
 _REQUIREMENT_DESCRIPTION_LABEL_RE = re.compile(r"requirement.{0,5}desc", re.IGNORECASE)
 _ENTRY_CRITERIA_LABEL_RE = re.compile(r"entry.{0,5}criteria", re.IGNORECASE)
 _EXIT_CRITERIA_LABEL_RE = re.compile(r"exit.{0,5}criteria", re.IGNORECASE)
+# Story-level, "Requirement" tab (backlog task-36) - a dedicated field
+# (Custom.PersonaInvolved), not embedded in Business Rules' own field.
+_PERSONA_INVOLVED_LABEL_RE = re.compile(r"persona", re.IGNORECASE)
+# Story-level, "Requirement" tab (backlog task-36) - also a dedicated field
+# (Custom.Functionalities), separate from Business Rules.
+_FUNCTIONALITIES_LABEL_RE = re.compile(r"functionalit", re.IGNORECASE)
+# Story-level, "UI and UX" tab (backlog task-37) - a dedicated field holding
+# a UI mockup/wireframe image, matching the original template's own
+# "[UI Screenshot / Wireframe]" worked-example placeholder for this exact
+# spot in a User Story block.
+_UI_DESCRIPTION_LABEL_RE = re.compile(r"ui.{0,5}desc", re.IGNORECASE)
 # The User Story's "Requirement" tab (backlog task-26) - deliberately
 # broader than the other _LABEL_RE patterns (just "requirement", no
 # qualifier) since this is a Story-level field, not competing with the
@@ -765,32 +933,22 @@ def _apply_section_2_3_placeholders(document: Document, context: dict) -> None:
     DESCENDING original-index order (bottom of the document first).
 
     Every PARA_* constant above was measured once, against the untouched
-    template. Any edit that inserts or removes paragraphs (2.4's trim,
-    3.3/3.5's Azure-content rendering - the latter can insert MORE
-    paragraphs than the template shipped, not just remove) shifts every
-    later paragraph's real position. Processing bottom-to-top means that by
-    the time any given index is used, everything AFTER it in the document
-    has already been finalized (so a later shift can't matter - that
-    section is done), and nothing BEFORE it has been touched yet (so ITS
-    index is still the original, correct one). Processing in document
+    template. Any edit that inserts or removes paragraphs (2.4's trim)
+    shifts every later paragraph's real position. Processing bottom-to-top
+    means that by the time any given index is used, everything AFTER it in
+    the document has already been finalized (so a later shift can't matter
+    - that section is done), and nothing BEFORE it has been touched yet (so
+    ITS index is still the original, correct one). Processing in document
     order, as earlier revisions of this function did, is what let a
     similar bug slip through once already (see backlog task-19's notes) -
     keep this order if more sections are added here.
+
+    3.3-3.6 (backlog task-34/35) are no longer here - they're now
+    heading-text-anchored (_apply_dependencies_section/_apply_roles_section/
+    _apply_assumptions_section/_apply_out_of_scope_section, called
+    separately in build_srs_document_v2), not index-based, since their
+    per-Epic-grouped content has no fixed paragraph/table count to reserve.
     """
-    # 3.5 Assumptions and Constraints - Epic-level Azure pull, read-only
-    # (backlog task-22). Falls back to one empty bullet if no Epic has
-    # matching content.
-    _render_bullets_at(
-        document, PARA_3_5_ASSUMPTIONS_FIRST, PARA_3_5_ASSUMPTIONS_COUNT,
-        _collect_epic_content_lines(context, _ASSUMPTIONS_LABEL_RE),
-    )
-
-    # 3.3 Dependencies with Other Modules / Systems - same pattern.
-    _render_bullets_at(
-        document, PARA_3_3_DEPENDENCIES_FIRST, PARA_3_3_DEPENDENCIES_COUNT,
-        _collect_epic_content_lines(context, _DEPENDENCIES_LABEL_RE),
-    )
-
     # 3.2 Process Overview - manual, always genuinely empty (backlog task-21).
     _set_placeholder_paragraph_text(document, PARA_3_2_PROCESS_OVERVIEW, None)
 
@@ -840,6 +998,27 @@ def _find_table_by_first_header_cell(document: Document, text: str) -> object:
         if table.rows and table.rows[0].cells and table.rows[0].cells[0].text.strip() == text:
             return table
     raise RuntimeError(f"expected a table with header {text!r} not found in the V2 template - did its structure change?")
+
+
+def _find_table_after_paragraph(document: Document, paragraph: Paragraph) -> object:
+    """The first table appearing after `paragraph` in document order - a
+    table located by STRUCTURAL position (right after a known heading)
+    rather than a fixed tables[] index (backlog task-34: no longer stable
+    for anything at or after 3.4, once 3.5's Assumptions section can
+    insert a variable number of its own tables ahead of them - a real bug
+    this caught: 3.6's table was being silently blanked as a stand-in for
+    a table that no longer existed at that index) or by header-cell text
+    (3.6's own header starts with "SL", the same first-cell text 1.2 and
+    1.3 both use, so a header-text lookup alone would be ambiguous here).
+    """
+    found_anchor = False
+    for element in document.element.body.iterchildren():
+        if element is paragraph._p:
+            found_anchor = True
+            continue
+        if found_anchor and element.tag == qn("w:tbl"):
+            return Table(element, document)
+    raise RuntimeError(f"expected a table after paragraph {paragraph.text!r} - did the V2 template structure change?")
 
 
 def _runs_to_text(runs: list[dict]) -> str:
@@ -980,6 +1159,32 @@ def _build_business_rules_table(scratch: Document, rules: list[tuple[str, str]])
     scratch.add_paragraph()  # spacer, matches every other table in this document
 
 
+def _build_labeled_blocks_section(
+    scratch: Document, heading_text: str, blocks: list[dict], minio, *, assets: list[dict] | None = None
+) -> None:
+    """Functionalities / Acceptance Criteria / UI Description (backlog
+    tasks 36/37) - a bold heading (same convention as
+    _build_business_rules_table's "Business Rules" label) followed by the
+    source content in its own native Azure shape (list stays a list, table
+    stays a table, embedded image stays an image) via docx_builder's
+    _render_blocks, same principle as 3.3-3.6 (backlog task-34/35).
+    Omitted entirely (no empty heading) when there's no matching content -
+    same as Business Rules, there's no template default to fall back to
+    since this never existed in the template before task-25 built the
+    story block it lives in.
+
+    `assets` defaults to [] (Functionalities/Acceptance Criteria are text
+    content, never images) - UI Description passes the story's own real
+    assets list so its embedded picture can actually be matched and
+    downloaded (see docx_builder._render_image_block).
+    """
+    if not blocks:
+        return
+    scratch.add_paragraph(heading_text).runs[0].bold = True
+    _render_blocks(scratch, blocks, minio=minio, assets=assets or [], used_object_keys=set())
+    scratch.add_paragraph()  # spacer, matches every other block in this story section
+
+
 # ---------------------------------------------------------------------------
 # 6. Non-Functional Requirements (backlog task-27)
 # ---------------------------------------------------------------------------
@@ -1061,6 +1266,68 @@ def _epic_nfr_marked_entries(lines: list[str]) -> list[list[str]] | None:
     return entries
 
 
+# An NFR's own explicit ID always starts with "NFR" (every real example
+# seen: NFR01-NFR08) - deliberately stricter than the generic
+# _EXPLICIT_ITEM_ID_RE (any letter-prefix + digits), because that generic
+# pattern also matches "FR09." (a Functional - not Non-Functional -
+# Requirement line living in the SAME field, see _epic_nfr_blocks) and
+# would wrongly treat it as an NFR marker, dragging everything up to the
+# next marker (once, an entire unrelated "Assumptions" table) in as its
+# "description".
+_NFR_ITEM_ID_RE = re.compile(r"^\s*(nfr[-_ ]?\d{1,4})\s*[:.\-–]\s*(.+)$", re.IGNORECASE | re.DOTALL)
+_NFR_SECTION_HEADING_RE = re.compile(r"non.{0,3}functional", re.IGNORECASE)
+
+
+def _epic_nfr_blocks(epic: dict) -> list[dict]:
+    """Scopes down to just the NFR-related portion of the Epic's
+    Analysis-tab field (backlog task-35 follow-up, 2026-09-03 real-data
+    report): that field turned out to hold OTHER named subsections too
+    (Business Process Diagram, User Persona, Functional Requirements,
+    Assumptions - see _epic_analysis_subsection_blocks), not just NFRs, so
+    processing the WHOLE field as NFR content (task-27's original
+    assumption - correct for the one epic tested then, which had nothing
+    else in that field) picks up unrelated content as fake NFRs once a
+    real field has more than just NFRs in it.
+
+    Two real shapes observed: (a) a field that's ENTIRELY NFR content, no
+    wrapper heading, starting directly with "NFR01 - ..." (Epic 118798);
+    (b) a field with other named subsections mixed in, where NFR content
+    might have its own "Non Functional Requirements" wrapper heading, OR
+    might just be identifiable by its own "NFR<n>" marker lines with no
+    wrapper at all. Handles both: finds the first NFR-looking marker
+    (a wrapper heading match, OR an "NFR<n>" item's own line), then
+    collects from there, treating any OTHER marker-like line as the end
+    boundary UNLESS it's itself another "NFR<n>" line (which continues the
+    section rather than ending it - each NFR item's own heading line would
+    otherwise look like the boundary for the item before it).
+    """
+    blocks = _matching_content_section_blocks(epic, _ANALYSIS_TAB_LABEL_RE)
+    if not blocks:
+        return []
+
+    start = None
+    for i, block in enumerate(blocks):
+        text = _block_marker_text(block)
+        if not text:
+            continue
+        if _NFR_SECTION_HEADING_RE.search(text) and _is_section_marker_block(block):
+            start = i + 1  # skip the wrapper heading itself - not NFR content
+            break
+        if _NFR_ITEM_ID_RE.match(text):
+            start = i  # no wrapper heading - this item's own line IS the start
+            break
+    if start is None:
+        return []
+
+    collected: list[dict] = []
+    for block in blocks[start:]:
+        text = _block_marker_text(block)
+        if text and _is_section_marker_block(block) and not _NFR_ITEM_ID_RE.match(text):
+            break
+        collected.append(block)
+    return collected
+
+
 def _epic_nfr_rows(epics: list[dict]) -> list[list[str]]:
     """6. Non-Functional Requirements table rows - backlog task-27: sourced
     from every Epic's own "Analysis" tab content, same
@@ -1078,7 +1345,7 @@ def _epic_nfr_rows(epics: list[dict]) -> list[list[str]]:
     rows: list[list[str]] = []
     next_generated = 1
     for epic in epics:
-        blocks = _matching_content_section_blocks(epic, _ANALYSIS_TAB_LABEL_RE)
+        blocks = _epic_nfr_blocks(epic)
         if not blocks:
             continue
         lines = [line.strip() for line in _list_derived_lines(blocks) if line.strip()]
@@ -1107,20 +1374,19 @@ def _build_story_info_table(
     story_id: str,
     epic_name: str,
     feature_name: str,
+    persona_involved: str,
     entry_criteria: str,
     exit_criteria: str,
 ) -> None:
     """User Story text/ID and Epic/Feature name are directly known from the
-    hierarchy already built by normalize_content. Entry/Exit Criteria are
-    sourced from the story's own content_sections, matched by label (same
-    unconfirmed-exact-field-name approach as Epic's Requirement Description
-    - see _matching_content_section_text) - blank if no matching field was
-    found on that story, not guessed. Persona Involved has no defined
-    source anywhere in docs/srs-content-mapping-spec.md, so it's left
-    blank - Business Rules and the rest of a full User Story block
-    (Functionalities, Acceptance Criteria, UI Description, Data Dictionary)
-    are separate, not-yet-scoped work (Business Rules specifically is
-    backlog task-26).
+    hierarchy already built by normalize_content. Persona Involved/Entry/
+    Exit Criteria are sourced from the story's own content_sections,
+    matched by label (same unconfirmed-exact-field-name approach as Epic's
+    Requirement Description - see _matching_content_section_text) - blank
+    if no matching field was found on that story, not guessed. Business
+    Rules/Functionalities/Acceptance Criteria are separate, appended after
+    this table (backlog tasks 26/36); UI Description/Data Dictionary remain
+    not-yet-scoped work.
     """
     table = scratch.add_table(rows=7, cols=2)
     table.style = "Table Grid"
@@ -1132,7 +1398,7 @@ def _build_story_info_table(
             ("User Story ID", story_id),
             ("Epic Name", epic_name),
             ("Feature Name", feature_name),
-            ("Persona Involved", ""),
+            ("Persona Involved", persona_involved),
             ("Entry Criteria", entry_criteria),
             ("Exit Criteria", exit_criteria),
         ),
@@ -1150,7 +1416,7 @@ def _build_story_info_table(
     scratch.add_paragraph()  # spacer, matches the spacing every other table in this document gets
 
 
-def _build_section_5_body(scratch: Document, epics: list[dict]) -> None:
+def _build_section_5_body(scratch: Document, epics: list[dict], minio) -> None:
     """Epic ID: {name}" / "Feature: {name}" / "User Story {NNN}: {title}"
     headings, literally numbered "5.{epic}", "5.{epic}.{feature}" matching
     the template's own convention (backlog task-10) - not Word
@@ -1174,13 +1440,43 @@ def _build_section_5_body(scratch: Document, epics: list[dict]) -> None:
                     story_id=f"US-{story['azure_work_item_id']}",
                     epic_name=epic.get("title") or "",
                     feature_name=feature.get("title") or "",
+                    persona_involved=_matching_content_section_text(story, _PERSONA_INVOLVED_LABEL_RE),
                     entry_criteria=_matching_content_section_text(story, _ENTRY_CRITERIA_LABEL_RE),
                     exit_criteria=_matching_content_section_text(story, _EXIT_CRITERIA_LABEL_RE),
                 )
                 _build_business_rules_table(scratch, _story_business_rules(story))  # backlog task-26
+                # Functionalities / Acceptance Criteria (backlog task-36) -
+                # right after Business Rules, matching the observed real
+                # story layout. Functionalities is a dedicated Requirement-
+                # tab field (Custom.Functionalities); Acceptance Criteria is
+                # Azure's own STANDARD field, already split out separately
+                # by generate_pipeline.py (never part of content_sections -
+                # see custom_fields.py's own _EXPLICITLY_HANDLED).
+                _build_labeled_blocks_section(
+                    scratch,
+                    "Functionalities",
+                    _matching_content_section_blocks(story, _FUNCTIONALITIES_LABEL_RE),
+                    minio,
+                )
+                _build_labeled_blocks_section(
+                    scratch, "Acceptance Criteria", story.get("acceptance_criteria_blocks") or [], minio
+                )
+                # UI Description (backlog task-37) - the "UI and UX" tab's
+                # mockup/wireframe image, matching the original template's
+                # own "[UI Screenshot / Wireframe]" worked-example spot.
+                # Needs the story's own REAL assets (not the default []
+                # Functionalities/Acceptance Criteria use) so the embedded
+                # picture can actually be matched and downloaded.
+                _build_labeled_blocks_section(
+                    scratch,
+                    "UI Description",
+                    _matching_content_section_blocks(story, _UI_DESCRIPTION_LABEL_RE),
+                    minio,
+                    assets=story.get("assets"),
+                )
 
 
-def _apply_section_5(document: Document, context: dict) -> None:
+def _apply_section_5(document: Document, context: dict, minio) -> None:
     epics = _flatten_by_type(context.get("roots") or [], "Epic")
     if not epics:
         return  # no Azure data to replace it with - keep the template's own worked example
@@ -1215,7 +1511,7 @@ def _apply_section_5(document: Document, context: dict) -> None:
     # up the template's actual heading colors/sizes correctly, not
     # python-docx's own blank-document defaults.
     scratch = Document()
-    _build_section_5_body(scratch, epics)
+    _build_section_5_body(scratch, epics, minio)
 
     anchor = heading_6._p
     for element in list(scratch.element.body.iterchildren()):
@@ -1229,10 +1525,12 @@ def _apply_section_5(document: Document, context: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_srs_document_v2(context: dict, minio) -> bytes:  # noqa: ARG001 - minio unused until sections 2-8 need embedded assets
+def build_srs_document_v2(context: dict, minio) -> bytes:
     """The "Generate Formatted SRS" entry point - same call signature as
     `docx_builder.build_srs_document(context, minio)` so `render_docx` can
     call either interchangeably based on `context["template_version"]`.
+    `minio` is passed through to 3.3-3.6's _render_blocks calls (image
+    blocks in any of those fields, if any - see _build_epic_grouped_body).
     """
     if not TEMPLATE_PATH.exists():
         raise RuntimeError(f"V2 template not found at {TEMPLATE_PATH} - was it packaged into the worker image?")
@@ -1248,6 +1546,26 @@ def build_srs_document_v2(context: dict, minio) -> bytes:  # noqa: ARG001 - mini
     update_header(document, header_top_right)
     _apply_section_2_3_placeholders(document, context)
 
+    roots = context.get("roots") or []
+    epics = _flatten_by_type(roots, "Epic")
+
+    # 3.3-3.6 - Epic-level Azure pull, read-only (backlog task-34/35,
+    # reworking task-22). Heading-text-anchored (see _replace_section_body),
+    # not index-based, per-Epic-grouped, native-Azure-shape-preserving -
+    # each pulls its own named subsection out of a bigger field (Details
+    # tab's description_blocks for 3.3/3.6, the Analysis-tab field also
+    # used for section 6's NFRs for 3.4/3.5 - see _epic_details_subsection_blocks/
+    # _epic_analysis_subsection_blocks) rather than matching a dedicated
+    # field by its own label - real Azure content (task-35) turned out to
+    # cram all of this into one or two big fields, not separate ones.
+    # Run before the table captures below since none of these touch a
+    # PRE-EXISTING table element, but logically belong with the rest of
+    # section 2/3.
+    _apply_dependencies_section(document, epics, minio)  # 3.3 Dependencies with Other Modules / Systems
+    _apply_roles_section(document, epics, minio)  # 3.4 User Roles / Personas
+    _apply_assumptions_section(document, epics, minio)  # 3.5 Assumptions and Constraints (Assumptions only)
+    _apply_out_of_scope_section(document, epics, minio)  # 3.6 Out of Scope
+
     tables = document.tables
     fill_document_information_table(tables[0], document_info)  # 1.1
     # 1.2/1.3/1.4 stay manually maintained (backlog task-7/13, unchanged) -
@@ -1257,28 +1575,28 @@ def build_srs_document_v2(context: dict, minio) -> bytes:  # noqa: ARG001 - mini
     # placeholder/example rows ([Name], V0.1, Business Analyst, Draft, ...)
     # to reference and edit, rather than a fully empty table.
     _populate_definitions_table(tables[4], context.get("v2_definitions"))  # 2.3 Definitions, Acronyms & Abbreviations
-    # 3.4/3.6 - Epic-level Azure pull, read-only (backlog task-22). Tables
-    # aren't affected by the paragraph-index shifts _apply_section_2_3_placeholders
-    # has to worry about, so these can run any time relative to it.
-    _populate_azure_sourced_table(
-        tables[5], _collect_epic_content_lines(context, _ROLES_LABEL_RE), content_col=0
-    )  # 3.4 User Roles / Personas
-    _populate_azure_sourced_table(
-        tables[6], _collect_epic_content_lines(context, _OUT_OF_SCOPE_LABEL_RE), content_col=1
-    )  # 3.6 Out of Scope (has a leading SL column)
     # 4.1/4.2 - Epic/Feature-level Azure pull, read-only (backlog tasks 23,
-    # 24). Every Epic/Feature in the sealed selection, not sampled - this
-    # is a direct listing, not an LLM synthesis.
-    roots = context.get("roots") or []
-    epics = _flatten_by_type(roots, "Epic")
-    _populate_epic_summary_table(tables[7], epics)  # 4.1 Epic / Functional Area Summary
-    _populate_feature_list_table(tables[8], _flatten_by_type(roots, "Feature"))  # 4.2 Feature List
+    # 24). Found by structural position (the table right after each one's
+    # own heading), NOT a tables[] index - 3.3-3.6 above can each now
+    # insert a variable number of their own tables ahead of these, which
+    # would otherwise silently shift every index after them (a real bug
+    # caught in testing: a downstream table was being blanked as a
+    # stand-in for a table that had moved to a different index). Nor by
+    # header-cell text alone - some of these tables share the same
+    # first-cell text as an unrelated earlier table.
+    _populate_epic_summary_table(
+        _find_table_after_paragraph(document, _find_paragraph(document, "4.1 Epic / Functional Area Summary")), epics
+    )  # 4.1 Epic / Functional Area Summary
+    _populate_feature_list_table(
+        _find_table_after_paragraph(document, _find_paragraph(document, "4.2 Feature List")),
+        _flatten_by_type(roots, "Feature"),
+    )  # 4.2 Feature List
 
     # 5. Functional Requirements - backlog task-25. Replaces the template's
     # worked example with real Epic/Feature/User-Story content, which
     # changes how many tables section 5 itself contains - so everything
     # AFTER it must be located by content, not a fixed index, from here on.
-    _apply_section_5(document, context)
+    _apply_section_5(document, context, minio)
 
     # 6. Non-Functional Requirements - backlog task-27. A single
     # document-wide table (not one per Epic/Story like section 5's), found
