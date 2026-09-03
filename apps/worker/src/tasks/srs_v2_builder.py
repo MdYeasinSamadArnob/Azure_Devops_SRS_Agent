@@ -427,21 +427,28 @@ def _populate_definitions_table(table, definitions: list[dict[str, str]] | None)
 # ERA_SRS_Template_V2.1.docx (build_v21_template.py's build_section_2/3
 # produce this exact paragraph layout) - re-confirm these if that builder
 # script changes section 2/3's structure.
+#
+# Re-measured 2026-09-03 (backlog task-32) after build_v21_template.py's
+# add_guidance() became a no-op - removing the template's 24 "Guidance: ..."
+# authoring-hint paragraphs (a separate fix, at the template's own source
+# rather than by pattern-matching arbitrary text at generation time) shifted
+# every one of these indices down. Re-confirm again if that builder script's
+# section 2/3 structure changes further.
 # ---------------------------------------------------------------------------
 
-PARA_2_1_PURPOSE = 37
-PARA_2_2_SCOPE = 40
+PARA_2_1_PURPOSE = 32
+PARA_2_2_SCOPE = 34
 # 2.4's 4 sample bullet paragraphs (backlog task-19) - REMOVING 3 of them
-# shifts every later paragraph index down by 3, so anything below index 49
-# (namely 3.1 at 60, 3.2 at 63, 3.3 at 67-69, 3.5 at 75-76) MUST be
+# shifts every later paragraph index down by 3, so anything below index 41
+# (namely 3.1 at 50, 3.2 at 52, 3.3 at 55-57, 3.5 at 61-62) MUST be
 # read/written before this range is touched.
-PARA_2_4_REFERENCES_FIRST = 46
+PARA_2_4_REFERENCES_FIRST = 38
 PARA_2_4_REFERENCES_COUNT = 4
-PARA_3_1_SOLUTION_OVERVIEW = 60
-PARA_3_2_PROCESS_OVERVIEW = 63
-PARA_3_3_DEPENDENCIES_FIRST = 67
+PARA_3_1_SOLUTION_OVERVIEW = 50
+PARA_3_2_PROCESS_OVERVIEW = 52
+PARA_3_3_DEPENDENCIES_FIRST = 55
 PARA_3_3_DEPENDENCIES_COUNT = 3
-PARA_3_5_ASSUMPTIONS_FIRST = 75
+PARA_3_5_ASSUMPTIONS_FIRST = 61
 PARA_3_5_ASSUMPTIONS_COUNT = 2
 # 3.4/3.6 are TABLES (indices 5/6 in document.tables), not paragraphs -
 # unaffected by 2.4's paragraph-removal, handled alongside the other tables
@@ -1243,9 +1250,12 @@ def build_srs_document_v2(context: dict, minio) -> bytes:  # noqa: ARG001 - mini
 
     tables = document.tables
     fill_document_information_table(tables[0], document_info)  # 1.1
-    blank_table_data_rows(tables[1])  # 1.2 Version/Revision History
-    blank_table_data_rows(tables[2])  # 1.3 Internal Review and Approval Matrix
-    blank_table_data_rows(tables[3])  # 1.4 Document Sign-Off
+    # 1.2/1.3/1.4 stay manually maintained (backlog task-7/13, unchanged) -
+    # the app never auto-populates them from Azure/LLM data. What changed
+    # (backlog task-33): they're no longer blanked either - left exactly as
+    # loaded from the template, so the user gets the template's own
+    # placeholder/example rows ([Name], V0.1, Business Analyst, Draft, ...)
+    # to reference and edit, rather than a fully empty table.
     _populate_definitions_table(tables[4], context.get("v2_definitions"))  # 2.3 Definitions, Acronyms & Abbreviations
     # 3.4/3.6 - Epic-level Azure pull, read-only (backlog task-22). Tables
     # aren't affected by the paragraph-index shifts _apply_section_2_3_placeholders
@@ -1277,10 +1287,9 @@ def build_srs_document_v2(context: dict, minio) -> bytes:  # noqa: ARG001 - mini
     # content has resized the document.
     _populate_table_rows(_find_table_by_first_header_cell(document, "NFR ID"), _epic_nfr_rows(epics))
 
-    # Found by its own header text, not a hardcoded index (tables[21] was
-    # only ever valid while section 5 always had exactly the template's own
-    # 2 worked-example tables - task-25 broke that assumption).
-    blank_table_data_rows(_find_table_by_first_header_cell(document, "BR ID"))  # 9. Requirement Traceability Matrix
+    # 9. Requirement Traceability Matrix (RTM) stays manually maintained too
+    # (backlog task-13/33, same as 1.2/1.3/1.4 above) - left exactly as
+    # loaded from the template, keeping its own placeholder example rows.
 
     buf = BytesIO()
     document.save(buf)
