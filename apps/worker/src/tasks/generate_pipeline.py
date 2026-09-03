@@ -147,6 +147,11 @@ def _build_hierarchy_tree(items: list[Any], assets_by_item: dict[str, list[dict]
             "work_item_type": item.work_item_type,
             "title": item.title,
             "state": item.state,
+            # Already imported/stored (Microsoft.VSTS.Common.Priority, see
+            # import_pipeline.py) - a string, not guaranteed numeric ("1"-"4"
+            # is typical but not enforced by Azure). Used by the v2
+            # pipeline's 4.2 Feature List priority mapping (backlog task-24).
+            "priority": item.priority,
             "description_blocks": html_to_blocks(item.description_html),
             "acceptance_criteria_blocks": html_to_blocks((item.acceptance_criteria or {}).get("html"))
             if item.acceptance_criteria
@@ -292,6 +297,32 @@ def _build_epic_grounding_bullets(context: dict[str, Any]) -> list[str]:
 _LLM_SYSTEM_PROMPT = "You are a technical writer producing a professional Software Requirements Specification document."
 
 
+def _parse_term_definitions(text: str | None) -> list[dict[str, str]]:
+    """Parses the LLM's "TERM: Definition" lines (backlog task-18) into
+    structured rows. Deliberately tolerant of the model drifting from the
+    requested format (a leading bullet/number, a "-" instead of ":") since
+    a line that fails to parse should just be skipped, not corrupt the
+    whole 2.3 table or throw and lose every other term that DID parse.
+    """
+    if not text:
+        return []
+    pairs: list[dict[str, str]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("-*•").strip()
+        if not line:
+            continue
+        if ":" in line:
+            term, _, definition = line.partition(":")
+        elif " - " in line:
+            term, _, definition = line.partition(" - ")
+        else:
+            continue
+        term, definition = term.strip(" *_"), definition.strip()
+        if term and definition:
+            pairs.append({"term": term, "definition": definition})
+    return pairs
+
+
 @celery_app.task(name="src.tasks.generate_pipeline.run_llm_rules", bind=True, max_retries=1)
 def run_llm_rules(self, context: dict[str, Any]) -> dict[str, Any]:
     """Optional AI enhancement. Never fails the chain — a slow, unreachable,
@@ -308,11 +339,15 @@ def run_llm_rules(self, context: dict[str, Any]) -> dict[str, Any]:
     separate prompts, not the same text reused twice, since the two
     sections ask different questions (scope boundaries vs. what the module
     does) even though both are "brief LLM synthesis from the same source".
+    Also (backlog task-18) a 2.3 Term/Definition table (v2_definitions) -
+    the LLM decides the whole term list itself, not just fills in one
+    templated row.
     """
     generation_job_id = context["generation_job_id"]
     context["ai_introduction"] = None
     context["v2_scope"] = None
     context["v2_solution_overview"] = None
+    context["v2_definitions"] = None
 
     with session_scope() as session:
         report_stage(session, job_id=generation_job_id, job_type="generate", stage="running_llm_rules")
@@ -347,6 +382,17 @@ def run_llm_rules(self, context: dict[str, Any]) -> dict[str, Any]:
                 system=_LLM_SYSTEM_PROMPT,
                 max_tokens=250,
             )
+            definitions_response = adapter.complete(
+                backlog_text
+                + "\n\nList every domain-specific term, acronym, or abbreviation a reader would need "
+                "defined to understand this Software Requirements Specification, based ONLY on the "
+                "epics listed above (include common SRS-process terms like SRS/BRD only if they would "
+                "genuinely appear in this document). Output ONE per line, in the exact format "
+                "'TERM: Definition', nothing else - no numbering, no markdown, no extra commentary.",
+                system=_LLM_SYSTEM_PROMPT,
+                max_tokens=400,
+            )
+            context["v2_definitions"] = _parse_term_definitions(definitions_response)
         else:
             context["ai_introduction"] = adapter.complete(
                 backlog_text
@@ -426,6 +472,7 @@ def render_docx(self, context: dict[str, Any]) -> dict[str, Any]:
             context.pop("ai_introduction", None)
             context.pop("v2_scope", None)
             context.pop("v2_solution_overview", None)
+            context.pop("v2_definitions", None)
             return context
         except Exception as exc:  # noqa: BLE001
             logger.exception("render_docx failed for job %s", generation_job_id)
