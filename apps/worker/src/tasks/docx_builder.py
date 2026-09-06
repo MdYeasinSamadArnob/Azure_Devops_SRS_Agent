@@ -82,6 +82,24 @@ def _safe_add_paragraph(document_or_cell, text: str = "", style: str | None = No
     the default style rather than failing the whole render, in case a future
     template swap doesn't define one of these exact style names.
 
+    Checks the style's existence FIRST (backlog task-39) rather than
+    attempting `add_paragraph(text, style=style)` and catching the
+    resulting KeyError - python-docx's `BlockItemContainer.add_paragraph()`
+    already creates and appends the new paragraph element BEFORE attempting
+    the (failing) style assignment, so catching the exception and retrying
+    with a second `add_paragraph()` call does NOT undo that first one - it
+    stays behind as a genuinely empty, permanently orphaned paragraph
+    (`_add_runs_paragraph` - the only caller that ever hits this fallback -
+    passes `text=""` here and adds the real runs itself afterward, so the
+    leaked paragraph has no text of its own to show; it's just a stray
+    blank paragraph sitting immediately before the one that actually gets
+    the content). Every style-fallback was silently leaking one of these -
+    stacking up as visible extra gaps between ordinary paragraphs wherever
+    a caller (the v2 pipeline, which never defines this org's "S Notes"/
+    "S Heading 2" styles) renders through this path (a real screenshot
+    showed exactly this: a Functionalities block's plain narrative lines,
+    each with one of these leaked blanks ahead of it).
+
     Defaults every paragraph to LEFT alignment regardless of what its named
     style specifies — the org template's "S Notes" style (used for most body
     content) defaults to JUSTIFY, which is fine for full-width prose but
@@ -90,11 +108,11 @@ def _safe_add_paragraph(document_or_cell, text: str = "", style: str | None = No
     want centered text (the cover page) explicitly set `.alignment` on the
     returned paragraph afterward, which overrides this default.
     """
-    try:
-        paragraph = document_or_cell.add_paragraph(text, style=style) if style else document_or_cell.add_paragraph(text)
-    except KeyError:
+    styles_source = document_or_cell if hasattr(document_or_cell, "styles") else document_or_cell.part.document
+    if style and not _style_exists(styles_source, style):
         logger.warning("style %r not found in template, falling back to default", style)
-        paragraph = document_or_cell.add_paragraph(text)
+        style = None
+    paragraph = document_or_cell.add_paragraph(text, style=style) if style else document_or_cell.add_paragraph(text)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
     return paragraph
 

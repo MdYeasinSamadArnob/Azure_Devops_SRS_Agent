@@ -32,7 +32,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from srs_core.rendering.html_text import blocks_to_plain_text
@@ -392,6 +392,15 @@ def _populate_table_rows(table, rows: list[list[str]]) -> None:
     table (backlog task-7's precedent) if `rows` is empty - "no source
     content" must never mean the template's own canned sample rows get
     silently passed off as real, generated content.
+
+    Defensive against a `table` narrower than `rows`' own column count
+    (backlog task-38: a real production IndexError, traced to a caller
+    matching the wrong, differently-shaped table - see
+    _find_table_by_header_row and _named_subsection_blocks' foreign-table
+    boundary check for the actual fixes to how that happens) - extra
+    values beyond what the table actually has columns for are silently
+    dropped rather than crashing the whole generation job over one
+    mismatched table.
     """
     if not rows:
         blank_table_data_rows(table)
@@ -401,6 +410,12 @@ def _populate_table_rows(table, rows: list[list[str]]) -> None:
     for i, values in enumerate(rows):
         row = data_rows[i] if i < len(data_rows) else table.add_row()
         for col, value in enumerate(values):
+            if col >= len(row.cells):
+                logger.warning(
+                    "_populate_table_rows: row has %d values but table only has %d columns - dropping the rest",
+                    len(values), len(row.cells),
+                )
+                break
             row.cells[col].text = value
 
     for row in data_rows[len(rows):]:
@@ -600,6 +615,22 @@ def _replace_section_body(document: Document, start_heading_text: str, end_headi
 # the one we DO want.
 _SECTION_MARKER_MAX_LENGTH = 60
 
+# A table whose own header row starts with "NFR" is section 6's own
+# content (backlog task-38's real production crash) - NEVER swept into
+# Dependencies/User Roles/Assumptions/Out of Scope even if it's positioned
+# right after one of their own marker lines with nothing else in between
+# (table/list blocks are otherwise invisible to _is_section_marker_block's
+# text-based marker detection, since _block_marker_text only handles
+# "text"/"heading" block types - a genuine table has no such text to
+# check). This matters more than a merely-misplaced Dependencies/Roles/
+# Out-of-Scope table would: section 6's own lookup
+# (_find_table_by_header_row) indexes into whatever it finds by a FIXED
+# column count, so a misplaced NFR-shaped table ending up somewhere else
+# isn't just a display glitch - it's a hard crash for the WHOLE
+# generation job once section 6 grabs the wrong, differently-shaped table
+# instead of its own.
+_NFR_TABLE_HEADER_RE = re.compile(r"^nfr", re.IGNORECASE)
+
 
 def _block_marker_text(block: dict) -> str:
     if block.get("type") in ("text", "heading"):
@@ -614,6 +645,26 @@ def _is_section_marker_block(block: dict) -> bool:
     return not text.rstrip().endswith((".", ":", ";", ","))
 
 
+def _table_header_first_cell_text(block: dict) -> str:
+    rows = block.get("rows") or []
+    if not rows or not rows[0]:
+        return ""
+    return _runs_to_text(rows[0][0]).strip()
+
+
+def _is_foreign_table_block(block: dict) -> bool:
+    """A table that belongs to a DIFFERENT, specific recognized section
+    (currently: section 6's NFR table, by its "NFR..." header) regardless
+    of which subsection is currently being collected - see
+    _NFR_TABLE_HEADER_RE's own comment for why this one case matters more
+    than a merely-misplaced table (backlog task-38's real production
+    crash). Only tables are checked (not lists) since the confirmed leak,
+    and the only downstream consumer that indexes by a fixed column
+    position, both involve a table.
+    """
+    return block.get("type") == "table" and bool(_NFR_TABLE_HEADER_RE.match(_table_header_first_cell_text(block)))
+
+
 def _named_subsection_blocks(blocks: list[dict], target_pattern: re.Pattern[str]) -> list[dict]:
     """Extracts the blocks belonging to ONE named subsection (e.g.
     "Dependencies", "Out of Scope", "Assumptions", "User Persona") from
@@ -623,15 +674,19 @@ def _named_subsection_blocks(blocks: list[dict], target_pattern: re.Pattern[str]
     Finds the FIRST block whose own text matches `target_pattern` AND
     looks like a section-marker line (_is_section_marker_block), then
     collects every block after it up to the NEXT marker-like block
-    (whatever subsection THAT one starts, known or not) or the end of the
-    field, whichever comes first. Returns [] if no such marker is found.
+    (whatever subsection THAT one starts, known or not) OR a foreign table
+    (_is_foreign_table_block - a table/list block is otherwise invisible
+    to the marker check above, so this is the only thing that stops a
+    misplaced NFR table from being vacuumed into whatever's being
+    collected here) or the end of the field, whichever comes first.
+    Returns [] if no such marker is found.
     """
     for i, block in enumerate(blocks):
         text = _block_marker_text(block)
         if text and target_pattern.search(text) and _is_section_marker_block(block):
             collected: list[dict] = []
             for later in blocks[i + 1 :]:
-                if _is_section_marker_block(later):
+                if _is_section_marker_block(later) or _is_foreign_table_block(later):
                     break
                 collected.append(later)
             return collected
@@ -668,6 +723,28 @@ def _epic_analysis_subsection_blocks(epic: dict, target_pattern: re.Pattern[str]
     return _matching_content_section_blocks(epic, target_pattern)
 
 
+def _render_blocks_tightly(scratch: Document, blocks: list[dict], minio, *, assets: list[dict] | None = None) -> None:
+    """Wraps docx_builder._render_blocks, then strips the default
+    per-paragraph space-after (backlog task-39) off every paragraph it just
+    added - the V2.1 template's own w:docDefaults gives EVERY paragraph a
+    10pt space-after with no distinction between "the next paragraph starts
+    a new logical block" (where that gap is exactly right - see every
+    heading-to-table transition elsewhere in this document) and "the next
+    paragraph is still part of THIS same flowing block" (where it reads as
+    an oversized, unintended gap - confirmed via a real screenshot of a
+    Functionalities block mixing short narrative lines with bullet lists,
+    each stacking its own 10pt gap on top of the others'). The heading
+    paragraph before this content and the spacer paragraph after it (added
+    separately by the caller) keep their own default spacing, since THAT
+    gap - between this whole block and whatever comes next - is the one
+    actually wanted; only what _render_blocks itself adds is tightened.
+    """
+    start_index = len(scratch.paragraphs)
+    _render_blocks(scratch, blocks, minio=minio, assets=assets or [], used_object_keys=set())
+    for paragraph in scratch.paragraphs[start_index:]:
+        paragraph.paragraph_format.space_after = Pt(0)
+
+
 def _build_epic_grouped_body(scratch: Document, epics: list[dict], get_blocks, minio) -> None:
     """Shared per-Epic-grouped, native-Azure-shape-preserving renderer for
     3.3/3.4/3.5/3.6 (backlog task-34/35) - one "Epic - [Name]:" bold
@@ -686,7 +763,7 @@ def _build_epic_grouped_body(scratch: Document, epics: list[dict], get_blocks, m
         any_content = True
         heading = scratch.add_paragraph()
         heading.add_run(f"Epic - {epic.get('title') or ''}:").bold = True
-        _render_blocks(scratch, blocks, minio=minio, assets=[], used_object_keys=set())
+        _render_blocks_tightly(scratch, blocks, minio)
     if not any_content:
         scratch.add_paragraph("[Empty]", style="List Bullet")
 
@@ -778,6 +855,11 @@ _FUNCTIONALITIES_LABEL_RE = re.compile(r"functionalit", re.IGNORECASE)
 # "[UI Screenshot / Wireframe]" worked-example placeholder for this exact
 # spot in a User Story block.
 _UI_DESCRIPTION_LABEL_RE = re.compile(r"ui.{0,5}desc", re.IGNORECASE)
+# Story-level, "WireFrame" tab (backlog task-40) - a dedicated field
+# (Custom.DataDictionary), rendered under the SAME "UI Description" heading
+# as the mockup image, per user direction (2026-09-06) - not a separate
+# labeled section, and not forced into any predefined table columns.
+_DATA_DICTIONARY_LABEL_RE = re.compile(r"data.{0,5}dict", re.IGNORECASE)
 # The User Story's "Requirement" tab (backlog task-26) - deliberately
 # broader than the other _LABEL_RE patterns (just "requirement", no
 # qualifier) since this is a Story-level field, not competing with the
@@ -1000,6 +1082,27 @@ def _find_table_by_first_header_cell(document: Document, text: str) -> object:
     raise RuntimeError(f"expected a table with header {text!r} not found in the V2 template - did its structure change?")
 
 
+def _find_table_by_header_row(document: Document, header_texts: tuple[str, ...]) -> object:
+    """Like _find_table_by_first_header_cell, but verifies the WHOLE header
+    row, not just its first cell - backlog task-38: a real production crash
+    (a differently-shaped table's own first cell coincidentally matching
+    another section's lookup text - see _named_subsection_blocks' new
+    foreign-table boundary check, which is the actual fix for how that
+    happens in the first place; this is the second, independent layer that
+    keeps the lookup itself safe even if some OTHER leak this doesn't
+    anticipate ever gets through) means matching just the first cell isn't
+    a safe enough signal for a table whose column count another function
+    is about to index into by a fixed position.
+    """
+    for table in document.tables:
+        if not table.rows:
+            continue
+        cells = table.rows[0].cells
+        if len(cells) == len(header_texts) and tuple(c.text.strip() for c in cells) == header_texts:
+            return table
+    raise RuntimeError(f"expected a table with header row {header_texts!r} not found in the V2 template - did its structure change?")
+
+
 def _find_table_after_paragraph(document: Document, paragraph: Paragraph) -> object:
     """The first table appearing after `paragraph` in document order - a
     table located by STRUCTURAL position (right after a known heading)
@@ -1181,7 +1284,7 @@ def _build_labeled_blocks_section(
     if not blocks:
         return
     scratch.add_paragraph(heading_text).runs[0].bold = True
-    _render_blocks(scratch, blocks, minio=minio, assets=assets or [], used_object_keys=set())
+    _render_blocks_tightly(scratch, blocks, minio, assets=assets)
     scratch.add_paragraph()  # spacer, matches every other block in this story section
 
 
@@ -1463,14 +1566,20 @@ def _build_section_5_body(scratch: Document, epics: list[dict], minio) -> None:
                 )
                 # UI Description (backlog task-37) - the "UI and UX" tab's
                 # mockup/wireframe image, matching the original template's
-                # own "[UI Screenshot / Wireframe]" worked-example spot.
-                # Needs the story's own REAL assets (not the default []
-                # Functionalities/Acceptance Criteria use) so the embedded
-                # picture can actually be matched and downloaded.
+                # own "[UI Screenshot / Wireframe]" worked-example spot -
+                # PLUS the "WireFrame" tab's Data Dictionary (backlog
+                # task-40), appended under this SAME heading rather than a
+                # separate one, per user direction, in its own native table
+                # shape (not forced into any predefined columns). Needs the
+                # story's own REAL assets (not the default []
+                # Functionalities/Acceptance Criteria use) so the UI
+                # mockup's embedded picture can actually be matched and
+                # downloaded.
                 _build_labeled_blocks_section(
                     scratch,
                     "UI Description",
-                    _matching_content_section_blocks(story, _UI_DESCRIPTION_LABEL_RE),
+                    _matching_content_section_blocks(story, _UI_DESCRIPTION_LABEL_RE)
+                    + _matching_content_section_blocks(story, _DATA_DICTIONARY_LABEL_RE),
                     minio,
                     assets=story.get("assets"),
                 )
@@ -1603,7 +1712,9 @@ def build_srs_document_v2(context: dict, minio) -> bytes:
     # by its own header text for the same reason as everything below
     # section 5: its original index isn't stable once section 5's dynamic
     # content has resized the document.
-    _populate_table_rows(_find_table_by_first_header_cell(document, "NFR ID"), _epic_nfr_rows(epics))
+    _populate_table_rows(
+        _find_table_by_header_row(document, ("NFR ID", "Category", "Requirement", "Target / SLA")), _epic_nfr_rows(epics)
+    )
 
     # 9. Requirement Traceability Matrix (RTM) stays manually maintained too
     # (backlog task-13/33, same as 1.2/1.3/1.4 above) - left exactly as
