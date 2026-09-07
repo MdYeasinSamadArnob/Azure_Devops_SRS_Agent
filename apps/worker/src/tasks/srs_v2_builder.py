@@ -519,7 +519,16 @@ def _clear_bullet_list_to_one_empty_item(document: Document, first_index: int, c
 # ---------------------------------------------------------------------------
 
 _DEPENDENCIES_LABEL_RE = re.compile(r"depend", re.IGNORECASE)
-_ROLES_LABEL_RE = re.compile(r"role|persona", re.IGNORECASE)
+# Also matches "Epic Purpose" as an alternate real-world field label
+# (2026-09-06, real Epic 118802) - that org's "Custom.EpicPurpose" field
+# holds no epic-purpose narrative at all; its ENTIRE content is the
+# Attribute/Description persona table (Persona, Role in Epic, Primary
+# Objective, Key Activities, ...), the same shape task-35 already expected
+# for User Persona - just sitting under a field name that gives no hint of
+# that. Same class of field-name/content mismatch as _ANALYSIS_TAB_LABEL_RE
+# needing "non functional" (task-27) and _REQUIREMENT_TAB_LABEL_RE needing
+# "business rule(s)".
+_ROLES_LABEL_RE = re.compile(r"role|persona|epic.{0,3}purpose", re.IGNORECASE)
 # Deliberately just "assumption" (backlog task-34), NOT "assumption|constraint"
 # - if an org keeps Assumptions and Constraints as two SEPARATE fields, this
 # must not also match the Constraints-only one; per user direction
@@ -856,9 +865,9 @@ _FUNCTIONALITIES_LABEL_RE = re.compile(r"functionalit", re.IGNORECASE)
 # spot in a User Story block.
 _UI_DESCRIPTION_LABEL_RE = re.compile(r"ui.{0,5}desc", re.IGNORECASE)
 # Story-level, "WireFrame" tab (backlog task-40) - a dedicated field
-# (Custom.DataDictionary), rendered under the SAME "UI Description" heading
-# as the mockup image, per user direction (2026-09-06) - not a separate
-# labeled section, and not forced into any predefined table columns.
+# (Custom.DataDictionary), rendered under its own "Data Dictionary" heading
+# (relabeled 2026-09-06 - previously folded under "UI Description" with no
+# label of its own) - not forced into any predefined table columns.
 _DATA_DICTIONARY_LABEL_RE = re.compile(r"data.{0,5}dict", re.IGNORECASE)
 # The User Story's "Requirement" tab (backlog task-26) - deliberately
 # broader than the other _LABEL_RE patterns (just "requirement", no
@@ -1566,22 +1575,30 @@ def _build_section_5_body(scratch: Document, epics: list[dict], minio) -> None:
                 )
                 # UI Description (backlog task-37) - the "UI and UX" tab's
                 # mockup/wireframe image, matching the original template's
-                # own "[UI Screenshot / Wireframe]" worked-example spot -
-                # PLUS the "WireFrame" tab's Data Dictionary (backlog
-                # task-40), appended under this SAME heading rather than a
-                # separate one, per user direction, in its own native table
-                # shape (not forced into any predefined columns). Needs the
-                # story's own REAL assets (not the default []
+                # own "[UI Screenshot / Wireframe]" worked-example spot.
+                # Needs the story's own REAL assets (not the default []
                 # Functionalities/Acceptance Criteria use) so the UI
                 # mockup's embedded picture can actually be matched and
                 # downloaded.
                 _build_labeled_blocks_section(
                     scratch,
                     "UI Description",
-                    _matching_content_section_blocks(story, _UI_DESCRIPTION_LABEL_RE)
-                    + _matching_content_section_blocks(story, _DATA_DICTIONARY_LABEL_RE),
+                    _matching_content_section_blocks(story, _UI_DESCRIPTION_LABEL_RE),
                     minio,
                     assets=story.get("assets"),
+                )
+                # Data Dictionary (backlog task-40, relabeled 2026-09-06) -
+                # the "WireFrame" tab's field table, under its OWN "Data
+                # Dictionary" heading (previously folded silently under "UI
+                # Description" with no label of its own - per user
+                # direction, give it a distinct heading so the pulled
+                # table's origin is clear), in its own native table shape
+                # (not forced into any predefined columns).
+                _build_labeled_blocks_section(
+                    scratch,
+                    "Data Dictionary",
+                    _matching_content_section_blocks(story, _DATA_DICTIONARY_LABEL_RE),
+                    minio,
                 )
 
 
