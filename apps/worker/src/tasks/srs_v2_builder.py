@@ -542,6 +542,15 @@ _ASSUMPTIONS_LABEL_RE = re.compile(r"assumption", re.IGNORECASE)
 # nothing against the template's own field label. {0,8} covers that plus
 # reasonable variants ("Out-of-Scope", "Out Of  Scope").
 _OUT_OF_SCOPE_LABEL_RE = re.compile(r"out.{0,8}scope", re.IGNORECASE)
+# 8.1 Reporting List (backlog task-29, revised 2026-09-07) - real org
+# evidence (Epic 118802) has this as its own dedicated field
+# (Custom.ListofOutputsorReports, humanized to "Listof Outputsor Reports"),
+# not a named subsection buried inside a bigger field like 3.3-3.6/6 needed
+# - "report" alone is enough and doesn't collide with any other real field
+# label observed so far (Dependencies/Assumptions/Constraints/EpicPurpose/
+# FeatureList/BusinessRules/*Diagram/FunctionalRequirement/
+# IntegrationRequirements/NonFunctionalRequirements - none contain "report").
+_REPORTING_LABEL_RE = re.compile(r"report", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +844,34 @@ def _apply_out_of_scope_section(document: Document, epics: list[dict], minio) ->
         lambda scratch: _build_epic_grouped_body(
             scratch, epics, lambda e: _epic_details_subsection_blocks(e, _OUT_OF_SCOPE_LABEL_RE), minio
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8.1 Reporting List (backlog task-29, revised 2026-09-07 per user
+# direction): Epic-level only - the original scope (Epic + Feature + User
+# Story, merged/deduplicated, IDed RPT-001/RPT-002...) is dropped in favor
+# of the same per-Epic-grouped, native-Azure-shape approach as 3.3-3.6 -
+# reporting content is free-form (prose, bullets, or a table depending on
+# the Epic), so it's shown as pulled rather than forced into the template's
+# fixed Report ID | Report Name | Purpose | User Role | Filters/Output
+# columns. The template's own "7.2 Output List" subsection - a mislabeled
+# duplicate of 8.1's structure sitting right after it under the "8."
+# heading - is inside the same replaced range and is dropped entirely,
+# never re-added (task-29's original AC#2, unaffected by the scope change).
+# ---------------------------------------------------------------------------
+
+
+def _epic_reporting_blocks(epic: dict) -> list[dict]:
+    return _matching_content_section_blocks(epic, _REPORTING_LABEL_RE)
+
+
+def _apply_reporting_section(document: Document, epics: list[dict], minio) -> None:
+    _replace_section_body(
+        document,
+        "8.1 Reporting List",
+        "9. Requirement Traceability Matrix (RTM)",
+        lambda scratch: _build_epic_grouped_body(scratch, epics, _epic_reporting_blocks, minio),
     )
 
 
@@ -1732,6 +1769,14 @@ def build_srs_document_v2(context: dict, minio) -> bytes:
     _populate_table_rows(
         _find_table_by_header_row(document, ("NFR ID", "Category", "Requirement", "Target / SLA")), _epic_nfr_rows(epics)
     )
+
+    # 8.1 Reporting List - backlog task-29 (revised 2026-09-07 - Epic-only,
+    # native shape, no ID/column mapping; see _apply_reporting_section).
+    # Section 7 (Integration Requirements) and 8.2 ("7.2 Output List" in the
+    # template body) are untouched by this call other than 8.2 being
+    # dropped as a side effect of replacing 8.1's own body - 7 is still the
+    # template's own worked example, not yet implemented.
+    _apply_reporting_section(document, epics, minio)
 
     # 9. Requirement Traceability Matrix (RTM) stays manually maintained too
     # (backlog task-13/33, same as 1.2/1.3/1.4 above) - left exactly as
