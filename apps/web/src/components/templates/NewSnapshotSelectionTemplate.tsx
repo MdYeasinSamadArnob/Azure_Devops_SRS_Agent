@@ -31,7 +31,7 @@ export function NewSnapshotSelectionTemplate({ projectId, jobId }: { projectId: 
       error={error}
       footerNote="Sealing locks this selection into an immutable snapshot — generate as many documents from it as you like."
       submitLabel="Seal snapshot"
-      submittingLabel="Sealing snapshot…"
+      submittingLabel="Sealing…"
       isSubmitting={isSubmitting}
       onSubmit={submit}
     />

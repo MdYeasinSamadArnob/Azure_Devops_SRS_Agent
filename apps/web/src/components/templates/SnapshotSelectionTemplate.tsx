@@ -1,12 +1,12 @@
 "use client";
 
-import { useMemo } from "react";
-import { Button } from "@/components/atoms/Button";
+import { useMemo, useState } from "react";
 import { TreeSelectionToolbar } from "@/components/molecules/TreeSelectionToolbar";
 import { WorkItemTree } from "@/components/organisms/WorkItemTree";
 import {
   EPIC_FEATURE_STORY_TYPES,
   collectSelectedIds,
+  deselectType,
   flattenIds,
   setSelectedByType,
   setSelectedEverywhere,
@@ -53,9 +53,28 @@ export function SnapshotSelectionTemplate({
   onSubmit,
 }: SnapshotSelectionTemplateProps) {
   const selectedCount = useMemo(() => (roots ? collectSelectedIds(roots).length : 0), [roots]);
+  const [removeTasks, setRemoveTasks] = useState(false);
+
+  // "Remove Tasks" has to win over whatever else last touched the
+  // selection - Select all, Select none, Epics/Features/Stories only, or a
+  // manual per-node toggle - not just apply once when the checkbox is
+  // ticked, so every selection-changing action is routed through this.
+  function applySelection(updater: (prev: WorkItemNode[]) => WorkItemNode[]) {
+    onRootsChange((prev) => {
+      const next = updater(prev);
+      return removeTasks ? deselectType(next, "task") : next;
+    });
+  }
 
   function handleToggle(azureId: number, selected: boolean) {
-    onRootsChange((prev) => toggleNode(prev, azureId, selected));
+    applySelection((prev) => toggleNode(prev, azureId, selected));
+  }
+
+  function handleRemoveTasksChange(checked: boolean) {
+    setRemoveTasks(checked);
+    if (checked) {
+      onRootsChange((prev) => deselectType(prev, "task"));
+    }
   }
 
   return (
@@ -79,16 +98,20 @@ export function SnapshotSelectionTemplate({
           <TreeSelectionToolbar
             selectedCount={selectedCount}
             totalCount={flattenIds(roots).length}
-            onSelectAll={() => onRootsChange((prev) => setSelectedEverywhere(prev, true))}
-            onSelectNone={() => onRootsChange((prev) => setSelectedEverywhere(prev, false))}
-            onSelectEpicsFeaturesStories={() => onRootsChange((prev) => setSelectedByType(prev, EPIC_FEATURE_STORY_TYPES))}
+            onSelectAll={() => applySelection((prev) => setSelectedEverywhere(prev, true))}
+            onSelectNone={() => applySelection((prev) => setSelectedEverywhere(prev, false))}
+            onSelectEpicsFeaturesStories={() => applySelection((prev) => setSelectedByType(prev, EPIC_FEATURE_STORY_TYPES))}
+            removeTasks={removeTasks}
+            onRemoveTasksChange={handleRemoveTasksChange}
+            submitLabel={submitLabel}
+            submittingLabel={submittingLabel}
+            isSubmitting={isSubmitting}
+            submitDisabled={isSubmitting || selectedCount === 0}
+            onSubmit={onSubmit}
           />
           <WorkItemTree roots={roots} unlinkedCount={unlinkedCount} onToggle={handleToggle} />
-          <div className="flex items-center justify-between border-t border-line pt-5">
+          <div className="border-t border-line pt-5">
             <p className="text-sm text-ink-faint">{footerNote}</p>
-            <Button onClick={onSubmit} disabled={isSubmitting || selectedCount === 0} className="shrink-0">
-              {isSubmitting ? submittingLabel : submitLabel}
-            </Button>
           </div>
         </>
       )}

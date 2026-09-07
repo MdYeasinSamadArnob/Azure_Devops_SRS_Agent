@@ -29,7 +29,7 @@ export function ReselectSnapshotTemplate({ projectId, snapshotId }: { projectId:
       error={error}
       footerNote="Confirming forks a new, independent snapshot from this selection and takes you straight to generation."
       submitLabel="Apply & continue"
-      submittingLabel="Applying selection…"
+      submittingLabel="Applying…"
       isSubmitting={isSubmitting}
       onSubmit={submit}
     />
