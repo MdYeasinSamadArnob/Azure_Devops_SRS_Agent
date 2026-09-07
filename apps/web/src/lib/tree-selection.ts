@@ -25,20 +25,6 @@ export function setSelectedByType(nodes: WorkItemNode[], allowedTypes: Set<strin
   }));
 }
 
-/** Forces every node of the given work item type (case-insensitive) to
- * unselected, leaving every other node's own selection state untouched -
- * backs the "Remove Tasks" toolbar checkbox, which must win over whatever
- * else changed the selection (Select all, Select none, Epics/Features/
- * Stories only, or a manual per-node toggle) rather than only applying once. */
-export function deselectType(nodes: WorkItemNode[], type: string): WorkItemNode[] {
-  const target = type.toLowerCase();
-  return nodes.map((node) => ({
-    ...node,
-    is_selected: node.work_item_type.toLowerCase() === target ? false : node.is_selected,
-    children: deselectType(node.children, type),
-  }));
-}
-
 export function toggleNode(nodes: WorkItemNode[], azureId: number, selected: boolean): WorkItemNode[] {
   return nodes.map((node) => {
     if (node.azure_work_item_id === azureId) {
