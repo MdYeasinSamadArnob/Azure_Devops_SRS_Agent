@@ -434,8 +434,32 @@ def _source_url_key(src: str | None) -> str:
     return (src or "")[:_SOURCE_URL_KEY_LENGTH]
 
 
+def _render_image_error(document: Document, source_label: str) -> None:
+    """Visible fallback when an image referenced by the source content
+    couldn't be embedded - no matching downloaded asset (never downloaded,
+    or the match against it genuinely failed), or the download/embed
+    itself raised. Silently dropping the image (the prior behavior) left
+    no trace it was ever supposed to be there - per user direction
+    (2026-09-08), this names the exact source (e.g. "User Story US-104384:
+    Charge Setup") so the reader knows exactly where to go re-add it in
+    Azure DevOps, instead of a gap with no explanation.
+    """
+    para = document.add_paragraph()
+    run = para.add_run(f"⚠ Error loading image — could not be pulled from Azure DevOps. Source: {source_label}")
+    run.italic = True
+    run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
 def _render_image_block(
-    document: Document, minio, block: dict, assets: list[dict], used_object_keys: set[str], *, caption: str | None
+    document: Document,
+    minio,
+    block: dict,
+    assets: list[dict],
+    used_object_keys: set[str],
+    *,
+    caption: str | None,
+    error_source_label: str | None = None,
 ) -> None:
     """Renders one inline `<img>` placeholder from `html_to_blocks` by
     matching it back to the asset downloaded for it at import time — matched
@@ -447,6 +471,13 @@ def _render_image_block(
     A caption (the heading immediately preceding this image in the source,
     e.g. "Context Diagram") renders directly above it — this is what makes
     each embedded diagram identifiable instead of an anonymous picture.
+
+    `error_source_label`, when given, renders a visible red error paragraph
+    naming that source (see _render_image_error) if the image can't be
+    matched or embedded - opt-in (defaults to the prior silent-drop
+    behavior) since a caller with no meaningful "source" to name (or the
+    legacy pipeline's own leftover-asset fallback pass, which already has
+    its own end-of-node handling) shouldn't get an orphaned error text.
     """
     src_key = _source_url_key(block.get("src"))
     match = next(
@@ -458,9 +489,11 @@ def _render_image_block(
         None,
     )
     if match is None:
-        # Not downloaded (or the match genuinely failed) — nothing to render
-        # here. This asset, if it exists at all, is still eligible for the
-        # end-of-node fallback pass, so it's never silently lost outright.
+        # Not downloaded (or the match genuinely failed). This asset, if it
+        # exists at all, is still eligible for the end-of-node fallback
+        # pass, so it's never silently lost outright.
+        if error_source_label:
+            _render_image_error(document, error_source_label)
         return
 
     if caption:
@@ -475,6 +508,8 @@ def _render_image_block(
         document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     except Exception:  # noqa: BLE001 — one bad image must not break the whole render
         logger.warning("could not embed image %s into document", match, exc_info=True)
+        if error_source_label:
+            _render_image_error(document, error_source_label)
     used_object_keys.add(match["object_key"])
 
 
@@ -609,7 +644,15 @@ def _render_list_block(document: Document, block: dict, level: int = 0) -> None:
             _render_list_block(document, sublist, level=level + 1)
 
 
-def _render_blocks(document: Document, blocks: list[dict], *, minio, assets: list[dict], used_object_keys: set[str]) -> None:
+def _render_blocks(
+    document: Document,
+    blocks: list[dict],
+    *,
+    minio,
+    assets: list[dict],
+    used_object_keys: set[str],
+    error_source_label: str | None = None,
+) -> None:
     """Renders `html_to_blocks` output with layout matching each block's
     actual shape: a real table for `table`, bullet paragraphs for `list`,
     an embedded picture for `image`, and left-aligned paragraphs for `text`
@@ -636,7 +679,9 @@ def _render_blocks(document: Document, blocks: list[dict], *, minio, assets: lis
         elif block_type == "code":
             _render_code_block(document, block.get("text") or "", block.get("language"))
         elif block_type == "image":
-            _render_image_block(document, minio, block, assets, used_object_keys, caption=None)
+            _render_image_block(
+                document, minio, block, assets, used_object_keys, caption=None, error_source_label=error_source_label
+            )
         elif block_type == "list":
             _render_list_block(document, block)
         elif block_type == "heading":
@@ -651,7 +696,15 @@ def _render_blocks(document: Document, blocks: list[dict], *, minio, assets: lis
             text_value = "".join(r["text"] for r in runs)
             next_block = blocks[index + 1] if index + 1 < total else None
             if next_block is not None and next_block.get("type") == "image" and len(text_value) <= _CAPTION_MAX_LENGTH:
-                _render_image_block(document, minio, next_block, assets, used_object_keys, caption=text_value)
+                _render_image_block(
+                    document,
+                    minio,
+                    next_block,
+                    assets,
+                    used_object_keys,
+                    caption=text_value,
+                    error_source_label=error_source_label,
+                )
                 index += 2
                 continue
             # A manually-typed "- item" line (not a real <ul>) still reads

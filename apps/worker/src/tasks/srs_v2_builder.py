@@ -569,6 +569,52 @@ _REPORTING_LABEL_RE = re.compile(r"report", re.IGNORECASE)
 # ---------------------------------------------------------------------------
 
 
+def _migrate_image_relationships(scratch: Document, real_document: Document) -> None:
+    """Fixes a real, confirmed bug (2026-09-08 production report - a UI
+    Description image rendering as the template's own header logo, or as a
+    broken-image placeholder): every embedded picture built into `scratch`
+    (via docx_builder._render_image_block's `document.add_picture()`, where
+    `document` is the scratch Document) gets a relationship ID that's only
+    meaningful within the SCRATCH document's OWN package - moving its
+    paragraphs into the real document via addprevious() (see
+    _replace_section_body/_apply_section_5) relocates the XML node, but
+    does NOT carry the image's relationship or binary part along with it.
+    The moved `<a:blip r:embed="rIdN">` reference then gets resolved
+    against the REAL document's OWN, unrelated relationship table instead -
+    silently rendering whatever rIdN happens to already mean there (the
+    header/cover logo, in the reported case) or nothing at all (a
+    broken-image placeholder) if no such ID exists there.
+
+    Must run BEFORE the scratch content is moved into the real document
+    (order doesn't matter for correctness - `related_parts`/`relate_to`
+    work directly against the XML objects, not tree position - but doing
+    it first keeps `scratch` intact for the lookup that's about to happen).
+
+    Also re-assigns each migrated image part a partname unique within the
+    REAL document's package before relating it - it still carries the
+    partname the SCRATCH package gave it (e.g. "image1.png", since each
+    scratch is its own fresh package starting that numbering over), which
+    real-world testing showed collides with a real, already-existing part
+    of the same name in the real document (its own cover-page logo, in the
+    confirmed case) - relate_to() doesn't rename on its own, so without
+    this a `word/media/image1.png` name collision silently corrupts the
+    saved package (python-docx's zip writer warns "Duplicate name" and one
+    of the two same-named entries wins arbitrarily on read).
+    """
+    for blip in scratch.element.body.iter(qn("a:blip")):
+        old_rid = blip.get(qn("r:embed"))
+        if not old_rid:
+            continue
+        image_part = scratch.part.related_parts.get(old_rid)
+        if image_part is None:
+            continue
+        image_part.partname = real_document.part.package.next_partname(
+            f"/word/media/image%d.{image_part.partname.ext}"
+        )
+        new_rid = real_document.part.relate_to(image_part, RT.IMAGE)
+        blip.set(qn("r:embed"), new_rid)
+
+
 def _replace_section_body(document: Document, start_heading_text: str, end_heading_text: str, build_fn) -> None:
     """Removes every paragraph/table between (not including) the heading
     `start_heading_text` and the heading `end_heading_text`, then inserts
@@ -608,6 +654,7 @@ def _replace_section_body(document: Document, start_heading_text: str, end_headi
 
     scratch = Document()
     build_fn(scratch)
+    _migrate_image_relationships(scratch, document)
 
     anchor = end_heading._p
     for element in list(scratch.element.body.iterchildren()):
@@ -741,7 +788,14 @@ def _epic_analysis_subsection_blocks(epic: dict, target_pattern: re.Pattern[str]
     return _matching_content_section_blocks(epic, target_pattern)
 
 
-def _render_blocks_tightly(scratch: Document, blocks: list[dict], minio, *, assets: list[dict] | None = None) -> None:
+def _render_blocks_tightly(
+    scratch: Document,
+    blocks: list[dict],
+    minio,
+    *,
+    assets: list[dict] | None = None,
+    error_source_label: str | None = None,
+) -> None:
     """Wraps docx_builder._render_blocks, then strips the default
     per-paragraph space-after (backlog task-39) off every paragraph it just
     added - the V2.1 template's own w:docDefaults gives EVERY paragraph a
@@ -758,7 +812,14 @@ def _render_blocks_tightly(scratch: Document, blocks: list[dict], minio, *, asse
     actually wanted; only what _render_blocks itself adds is tightened.
     """
     start_index = len(scratch.paragraphs)
-    _render_blocks(scratch, blocks, minio=minio, assets=assets or [], used_object_keys=set())
+    _render_blocks(
+        scratch,
+        blocks,
+        minio=minio,
+        assets=assets or [],
+        used_object_keys=set(),
+        error_source_label=error_source_label,
+    )
     for paragraph in scratch.paragraphs[start_index:]:
         paragraph.paragraph_format.space_after = Pt(0)
 
@@ -1006,19 +1067,36 @@ _ANALYSIS_TAB_LABEL_RE = re.compile(r"analysis|non.{0,3}functional", re.IGNORECA
 _EXPLICIT_ITEM_ID_RE = re.compile(r"^\s*([A-Za-z]{1,10}[-_ ]?\d{1,4})\s*[:.\-–]\s*(.+)$", re.DOTALL)
 
 
+def _blocks_have_content(blocks: list[dict]) -> bool:
+    """True if `blocks` has anything genuinely worth rendering.
+    blocks_to_plain_text alone misses "image" blocks entirely (it only
+    flattens text/heading/code/list/table types - see its own docstring/
+    implementation in srs_core.rendering.html_text), so a field whose
+    content is JUST an embedded picture with no caption text would
+    otherwise look content-free and get silently dropped before ever
+    reaching the renderer - a real, confirmed shape (2026-09-08 real-org
+    report): a User Story's "UI Description" field (UI and UX tab) holding
+    only image(s), no accompanying text.
+    """
+    if blocks_to_plain_text(blocks):
+        return True
+    return any(block.get("type") == "image" for block in blocks)
+
+
 def _matching_content_section_blocks(node: dict, label_pattern: re.Pattern[str]) -> list[dict]:
     """First content_section on `node` whose label matches `label_pattern`
-    and has actual content, as RAW blocks (not flattened to text) - lets a
-    caller that cares about list/sublist structure (see
-    _list_derived_lines) inspect it directly instead of losing it
-    to blocks_to_plain_text's flat one-line-per-item join. Same
-    label-matching/first-non-empty-match rule as _matching_content_section_text,
-    which is now just this plus a flatten step.
+    and has actual content (_blocks_have_content - text OR at least one
+    image), as RAW blocks (not flattened to text) - lets a caller that
+    cares about list/sublist structure (see _list_derived_lines) inspect
+    it directly instead of losing it to blocks_to_plain_text's flat
+    one-line-per-item join. Same label-matching/first-non-empty-match rule
+    as _matching_content_section_text, which is now just this plus a
+    flatten step.
     """
     for section in node.get("content_sections") or []:
         if label_pattern.search(section.get("label") or ""):
             blocks = section.get("blocks") or []
-            if blocks_to_plain_text(blocks):
+            if _blocks_have_content(blocks):
                 return blocks
     return []
 
@@ -1373,7 +1451,13 @@ def _build_business_rules_table(scratch: Document, rules: list[tuple[str, str]])
 
 
 def _build_labeled_blocks_section(
-    scratch: Document, heading_text: str, blocks: list[dict], minio, *, assets: list[dict] | None = None
+    scratch: Document,
+    heading_text: str,
+    blocks: list[dict],
+    minio,
+    *,
+    assets: list[dict] | None = None,
+    error_source_label: str | None = None,
 ) -> None:
     """Functionalities / Acceptance Criteria / UI Description (backlog
     tasks 36/37) - a bold heading (same convention as
@@ -1390,11 +1474,17 @@ def _build_labeled_blocks_section(
     content, never images) - UI Description passes the story's own real
     assets list so its embedded picture can actually be matched and
     downloaded (see docx_builder._render_image_block).
+
+    `error_source_label`, when given, makes a failed image embed (no
+    matching downloaded asset, or the download/embed itself failing) show
+    a visible red error paragraph naming this source, instead of silently
+    leaving nothing - per user direction (2026-09-08), so the reader knows
+    exactly where to go add the image themselves in Azure DevOps.
     """
     if not blocks:
         return
     scratch.add_paragraph(heading_text).runs[0].bold = True
-    _render_blocks_tightly(scratch, blocks, minio, assets=assets)
+    _render_blocks_tightly(scratch, blocks, minio, assets=assets, error_source_label=error_source_label)
     scratch.add_paragraph()  # spacer, matches every other block in this story section
 
 
@@ -1457,7 +1547,7 @@ def _epic_nfr_blocks(epic: dict) -> list[dict]:
         if not _ANALYSIS_TAB_LABEL_RE.search(label):
             continue
         blocks = section.get("blocks") or []
-        if not blocks_to_plain_text(blocks):
+        if not _blocks_have_content(blocks):
             continue
         if _NFR_SECTION_HEADING_RE.search(label):
             return blocks  # dedicated field - shape (a), no scoping needed
@@ -1567,12 +1657,13 @@ def _build_section_5_body(scratch: Document, epics: list[dict], minio) -> None:
             for story in feature.get("children") or []:
                 story_number += 1
                 title = story.get("title") or ""
+                story_id = f"US-{story['azure_work_item_id']}"
                 scratch.add_paragraph(f"User Story {story_number:0{_STORY_NUMBER_WIDTH}d}: {title}", style="Heading 3")
                 story_text = blocks_to_plain_text(story.get("description_blocks") or []) or title
                 _build_story_info_table(
                     scratch,
                     story_text=story_text,
-                    story_id=f"US-{story['azure_work_item_id']}",
+                    story_id=story_id,
                     epic_name=epic.get("title") or "",
                     feature_name=feature.get("title") or "",
                     persona_involved=_matching_content_section_text(story, _PERSONA_INVOLVED_LABEL_RE),
@@ -1602,13 +1693,16 @@ def _build_section_5_body(scratch: Document, epics: list[dict], minio) -> None:
                 # Needs the story's own REAL assets (not the default []
                 # Functionalities/Acceptance Criteria use) so the UI
                 # mockup's embedded picture can actually be matched and
-                # downloaded.
+                # downloaded. error_source_label names this exact story so
+                # a failed pull shows a visible pointer back to it, per
+                # user direction (2026-09-08), instead of silently nothing.
                 _build_labeled_blocks_section(
                     scratch,
                     "UI Description",
                     _matching_content_section_blocks(story, _UI_DESCRIPTION_LABEL_RE),
                     minio,
                     assets=story.get("assets"),
+                    error_source_label=f"User Story {story_id}: {title}",
                 )
                 # Data Dictionary (backlog task-40, relabeled 2026-09-06) -
                 # the "WireFrame" tab's field table, under its OWN "Data
@@ -1661,6 +1755,7 @@ def _apply_section_5(document: Document, context: dict, minio) -> None:
     # python-docx's own blank-document defaults.
     scratch = Document()
     _build_section_5_body(scratch, epics, minio)
+    _migrate_image_relationships(scratch, document)
 
     anchor = heading_6._p
     for element in list(scratch.element.body.iterchildren()):
