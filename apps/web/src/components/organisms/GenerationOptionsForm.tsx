@@ -241,27 +241,23 @@ export function GenerationOptionsForm({
           </p>
         )}
         <div className="space-y-2">
+          {/* The "Generate Document" (legacy) button is hidden, not removed
+              from the codebase - handleSubmit("legacy") and the "legacy"
+              template_version path (API + worker) are untouched, so it can
+              be brought back by re-adding the button below if needed:
+              <Button type="button" onClick={() => handleSubmit("legacy")}
+                disabled={!isSealed || submitting !== null || (!formats.docx && !formats.pdf)}
+                className="w-full">
+                {submitting === "legacy" ? "Starting generation…" : "Generate Document"}
+              </Button> */}
           <Button
             type="button"
-            onClick={() => handleSubmit("legacy")}
-            disabled={!isSealed || submitting !== null || (!formats.docx && !formats.pdf)}
-            className="w-full"
-          >
-            {submitting === "legacy" ? "Starting generation…" : "Generate Document"}
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
             onClick={() => handleSubmit("v2")}
             disabled={!isSealed || submitting !== null || (!formats.docx && !formats.pdf)}
             className="w-full"
           >
             {submitting === "v2" ? "Starting generation…" : "Generate Formatted SRS"}
           </Button>
-          <p className="text-xs text-ink-faint">
-            “Generate Formatted SRS” produces the new, more organized SRS template — currently covers the cover
-            page, header/footer, table of contents, and Document Control section; the rest is still being built out.
-          </p>
         </div>
       </form>
     </Card>

@@ -25,17 +25,22 @@ export function setSelectedByType(nodes: WorkItemNode[], allowedTypes: Set<strin
   }));
 }
 
-/** Forces every node of the given work item type (case-insensitive) to
- * unselected, leaving every other node's own selection state untouched -
+// Non-requirement work item types the "Remove Tasks" toolbar checkbox
+// clears out - Tasks plus the other tracking/housekeeping types (Bug/Risk/
+// Issue) that show up in a real Azure backlog alongside Epics/Features/
+// User Stories but aren't SRS content themselves.
+export const REMOVABLE_WORK_ITEM_TYPES = new Set(["task", "bug", "risk", "issue"]);
+
+/** Forces every node whose work_item_type is in `types` (case-insensitive)
+ * to unselected, leaving every other node's own selection state untouched -
  * backs the "Remove Tasks" toolbar checkbox, which must win over whatever
  * else changed the selection (Select all, Select none, Epics/Features/
  * Stories only, or a manual per-node toggle) rather than only applying once. */
-export function deselectType(nodes: WorkItemNode[], type: string): WorkItemNode[] {
-  const target = type.toLowerCase();
+export function deselectTypes(nodes: WorkItemNode[], types: Set<string>): WorkItemNode[] {
   return nodes.map((node) => ({
     ...node,
-    is_selected: node.work_item_type.toLowerCase() === target ? false : node.is_selected,
-    children: deselectType(node.children, type),
+    is_selected: types.has(node.work_item_type.toLowerCase()) ? false : node.is_selected,
+    children: deselectTypes(node.children, types),
   }));
 }
 

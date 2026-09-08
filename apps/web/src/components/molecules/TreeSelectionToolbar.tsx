@@ -54,7 +54,7 @@ export function TreeSelectionToolbar({
             className="h-3.5 w-3.5 shrink-0 rounded-sm border-line-strong"
             style={{ accentColor: "var(--color-accent)" }}
           />
-          Remove Tasks
+          Remove Tasks, Bugs, Issues, and Risks
         </label>
       </div>
       {/* Count + submit get their own dedicated row so the button's

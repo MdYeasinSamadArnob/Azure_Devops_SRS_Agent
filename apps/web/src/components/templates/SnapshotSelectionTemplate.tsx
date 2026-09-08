@@ -6,7 +6,8 @@ import { WorkItemTree } from "@/components/organisms/WorkItemTree";
 import {
   EPIC_FEATURE_STORY_TYPES,
   collectSelectedIds,
-  deselectType,
+  REMOVABLE_WORK_ITEM_TYPES,
+  deselectTypes,
   flattenIds,
   setSelectedByType,
   setSelectedEverywhere,
@@ -62,7 +63,7 @@ export function SnapshotSelectionTemplate({
   function applySelection(updater: (prev: WorkItemNode[]) => WorkItemNode[]) {
     onRootsChange((prev) => {
       const next = updater(prev);
-      return removeTasks ? deselectType(next, "task") : next;
+      return removeTasks ? deselectTypes(next, REMOVABLE_WORK_ITEM_TYPES) : next;
     });
   }
 
@@ -73,7 +74,7 @@ export function SnapshotSelectionTemplate({
   function handleRemoveTasksChange(checked: boolean) {
     setRemoveTasks(checked);
     if (checked) {
-      onRootsChange((prev) => deselectType(prev, "task"));
+      onRootsChange((prev) => deselectTypes(prev, REMOVABLE_WORK_ITEM_TYPES));
     }
   }
 

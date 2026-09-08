@@ -1399,85 +1399,14 @@ def _build_labeled_blocks_section(
 
 
 # ---------------------------------------------------------------------------
-# 6. Non-Functional Requirements (backlog task-27)
+# 6. Non-Functional Requirements (backlog task-27, revised 2026-09-08 per
+# user direction: no ID/Category mapping into the template's fixed columns
+# - NFRs are authored too differently across Epics (a one-line "ID: Category
+# - text" list in one, an "<h3> caption + <p> paragraphs" shape in another,
+# possibly a table in a third) for one mapping to fit all of them. Shown as
+# pulled, per-Epic, in its own native Azure shape instead - same
+# no-mapping principle already settled on for 7.2/8.1.
 # ---------------------------------------------------------------------------
-
-_NFR_ID_PREFIX = "NFR"
-# Category is embedded in the source text right before the NFR's own
-# description, separated by ":", "-", or "->" per docs/srs-content-mapping-spec.md
-# (e.g. "Performance: Screen loads shall complete within X seconds.").
-# Bounded to a short, plain leading phrase so this doesn't misfire on
-# ordinary prose that happens to contain a colon/hyphen further into the
-# sentence - if nothing that short-and-early matches, the whole line is
-# left as the Requirement text with Category blank rather than guessed.
-# The spec also allows a "highlighted" (e.g. bold-run) category with no
-# punctuated separator at all - NOT handled here, since that needs the
-# raw per-run formatting rather than plain text; see backlog TASK-31 (or a
-# future follow-up) if a real org turns out to rely on that form instead.
-_NFR_CATEGORY_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 /&]{1,29})\s*(?:->|:|-|–)\s*(\S.*)$", re.DOTALL)
-
-
-def _parse_nfr_category(text: str) -> tuple[str, str]:
-    """Splits one NFR line into (category, requirement) per _NFR_CATEGORY_RE,
-    or ("", text) unchanged if no leading category-like prefix is found.
-    """
-    match = _NFR_CATEGORY_RE.match(text)
-    if not match:
-        return "", text
-    return match.group(1).strip(), match.group(2).strip()
-
-
-def _epic_nfr_marked_entries(lines: list[str]) -> list[list[str]] | None:
-    """Groups a flat sequence of lines into [id, category, requirement]
-    triples by treating any line that matches _EXPLICIT_ITEM_ID_RE as the
-    START of a new NFR - every line up to (not including) the NEXT such
-    marker line, or the end of the sequence, is that NFR's own requirement
-    text.
-
-    This is deliberately NOT based on distinguishing a "heading" block
-    from a "text" block: the real shape observed in the first org tested
-    (2026-09-03 follow-up) is an "<h3>NFR01 - Security</h3>" caption
-    followed by one or more "<p>" description paragraphs - but genuine
-    (non-Markdown) HTML input never produces "heading"-typed blocks in the
-    first place (see html_to_blocks/_BlockExtractor's own docstring: a
-    real HTML `<h3>` is deliberately treated as a plain caption paragraph,
-    landing in the same "text" block type as what follows it, since
-    that's also what an Azure image-caption heading like "Context
-    Diagram" needs). "heading" blocks only ever come from Markdown-sourced
-    fields. So the ID-prefix marker on the line's own text is the only
-    reliable signal here, regardless of which block type produced it.
-
-    A marker line's own remainder (after its ID) is treated as the
-    Category ONLY when further lines follow it before the next marker
-    (the heading-plus-paragraphs shape - the remainder is just "Security",
-    the real text is in what follows). When nothing follows before the
-    next marker (or the end), the marker line is assumed to carry
-    category AND requirement together on that one line (the
-    originally-assumed "ID: Category - requirement text" shape) and
-    _parse_nfr_category is applied to split it further.
-
-    Returns None if no line carries an explicit ID at all - the tell that
-    this content isn't marker-delimited, so the caller should fall back to
-    the "every line is its own NFR" treatment instead.
-    """
-    marker_indices = [i for i, line in enumerate(lines) if _EXPLICIT_ITEM_ID_RE.match(line)]
-    if not marker_indices:
-        return None
-
-    entries: list[list[str]] = []
-    for position, start in enumerate(marker_indices):
-        end = marker_indices[position + 1] if position + 1 < len(marker_indices) else len(lines)
-        match = _EXPLICIT_ITEM_ID_RE.match(lines[start])
-        nfr_id = match.group(1).strip()  # type: ignore[union-attr]
-        remainder = match.group(2).strip()  # type: ignore[union-attr]
-        following = " ".join(lines[start + 1 : end]).strip()
-        if following:
-            category, requirement = remainder, following
-        else:
-            category, requirement = _parse_nfr_category(remainder)
-        entries.append([nfr_id, category, requirement])
-    return entries
-
 
 # An NFR's own explicit ID always starts with "NFR" (every real example
 # seen: NFR01-NFR08) - deliberately stricter than the generic
@@ -1492,32 +1421,55 @@ _NFR_SECTION_HEADING_RE = re.compile(r"non.{0,3}functional", re.IGNORECASE)
 
 
 def _epic_nfr_blocks(epic: dict) -> list[dict]:
-    """Scopes down to just the NFR-related portion of the Epic's
-    Analysis-tab field (backlog task-35 follow-up, 2026-09-03 real-data
-    report): that field turned out to hold OTHER named subsections too
-    (Business Process Diagram, User Persona, Functional Requirements,
-    Assumptions - see _epic_analysis_subsection_blocks), not just NFRs, so
-    processing the WHOLE field as NFR content (task-27's original
-    assumption - correct for the one epic tested then, which had nothing
-    else in that field) picks up unrelated content as fake NFRs once a
-    real field has more than just NFRs in it.
+    """Finds the Epic's NFR content and returns it AS-IS - whatever native
+    shape html_to_blocks (or its Markdown-source counterpart - Azure
+    content sometimes arrives pre-converted from Markdown rather than raw
+    HTML, e.g. an Excel/Word paste; both feed the same block schema here,
+    so no special-casing is needed once the right blocks are found) already
+    produced: a table stays a table, a bullet list stays a list, plain
+    paragraphs stay paragraphs.
 
-    Two real shapes observed: (a) a field that's ENTIRELY NFR content, no
-    wrapper heading, starting directly with "NFR01 - ..." (Epic 118798);
-    (b) a field with other named subsections mixed in, where NFR content
-    might have its own "Non Functional Requirements" wrapper heading, OR
-    might just be identifiable by its own "NFR<n>" marker lines with no
-    wrapper at all. Handles both: finds the first NFR-looking marker
-    (a wrapper heading match, OR an "NFR<n>" item's own line), then
-    collects from there, treating any OTHER marker-like line as the end
-    boundary UNLESS it's itself another "NFR<n>" line (which continues the
-    section rather than ending it - each NFR item's own heading line would
-    otherwise look like the boundary for the item before it).
+    Two real field shapes (backlog task-35/task-27 follow-ups):
+      (a) a DEDICATED field whose own label already says "Non Functional
+          Requirements" (Custom.NonFunctionalRequirements - confirmed real,
+          Epic 118798) - nothing else shares this field, so its ENTIRE
+          content is returned directly, regardless of internal shape
+          (marker-line list, heading+paragraphs, OR a bare table with no
+          marker at all - real-org report, 2026-09-08: a second Epic's NFR
+          content was a genuine table with no preceding marker text, which
+          the OLD marker-anchored scan below couldn't find a start point
+          for at all - _block_marker_text is "" for non-text/heading
+          blocks, so a field that's just a table, table, table has no
+          marker to anchor the old scan on).
+      (b) the broader "Analysis" field (task-35), which real orgs have
+          shown mixes NFRs with OTHER named subsections (Business Process
+          Diagram, User Persona, Assumptions, ...) - here a marker-anchored
+          scope-down is still needed to avoid picking up unrelated
+          content, so this path keeps the original logic: find the first
+          NFR-looking marker (a "non functional" wrapper heading, or an
+          "NFR<n>" item's own line), then collect until the next
+          marker-like line (any OTHER marker ends the section, but another
+          "NFR<n>" line continues it, since each item's own line would
+          otherwise look like the end of the item before it).
     """
-    blocks = _matching_content_section_blocks(epic, _ANALYSIS_TAB_LABEL_RE)
-    if not blocks:
-        return []
+    for section in epic.get("content_sections") or []:
+        label = section.get("label") or ""
+        if not _ANALYSIS_TAB_LABEL_RE.search(label):
+            continue
+        blocks = section.get("blocks") or []
+        if not blocks_to_plain_text(blocks):
+            continue
+        if _NFR_SECTION_HEADING_RE.search(label):
+            return blocks  # dedicated field - shape (a), no scoping needed
+        return _scope_to_nfr_marker_range(blocks)  # mixed field - shape (b)
+    return []
 
+
+def _scope_to_nfr_marker_range(blocks: list[dict]) -> list[dict]:
+    """The marker-anchored scope-down for shape (b) above - unchanged from
+    the original task-27/task-35-follow-up logic, just split out so
+    _epic_nfr_blocks can skip straight past it for a dedicated field.
+    """
     start = None
     for i, block in enumerate(blocks):
         text = _block_marker_text(block)
@@ -1541,43 +1493,13 @@ def _epic_nfr_blocks(epic: dict) -> list[dict]:
     return collected
 
 
-def _epic_nfr_rows(epics: list[dict]) -> list[list[str]]:
-    """6. Non-Functional Requirements table rows - backlog task-27: sourced
-    from every Epic's own "Analysis" tab content, same
-    explicit-ID-vs-generate either/or rule as Business Rules (task-26), but
-    applied per-Epic (each Epic's own Analysis-tab content is independently
-    judged - one Epic having explicit IDs doesn't force another Epic's
-    unlabeled content to invent IDs that aren't there).
-
-    Unlike Business Rules, which gets its own separate table per User
-    Story (so generated IDs restart at 001 for every story), section 6 is
-    ONE table for the whole document - so a GENERATED id here is a single
-    counter that runs continuously across every Epic's own content, in
-    Epic order, rather than resetting per Epic.
-    """
-    rows: list[list[str]] = []
-    next_generated = 1
-    for epic in epics:
-        blocks = _epic_nfr_blocks(epic)
-        if not blocks:
-            continue
-        lines = [line.strip() for line in _list_derived_lines(blocks) if line.strip()]
-        if not lines:
-            continue
-
-        marked_entries = _epic_nfr_marked_entries(lines)
-        if marked_entries is not None:
-            for nfr_id, category, requirement in marked_entries:
-                rows.append([nfr_id, category, requirement, ""])
-            continue
-
-        # No line anywhere carries an explicit ID - an ordinary unlabeled
-        # bullet list, so every line is its own generated NFR.
-        for line in lines:
-            category, requirement = _parse_nfr_category(line)
-            rows.append([f"{_NFR_ID_PREFIX}-{next_generated:03d}", category, requirement, ""])
-            next_generated += 1
-    return rows
+def _apply_nfr_section(document: Document, epics: list[dict], minio) -> None:
+    _replace_section_body(
+        document,
+        "6. Non-Functional Requirements",
+        "7. Integration Requirements",
+        lambda scratch: _build_epic_grouped_body(scratch, epics, _epic_nfr_blocks, minio),
+    )
 
 
 def _build_story_info_table(
@@ -1825,14 +1747,12 @@ def build_srs_document_v2(context: dict, minio) -> bytes:
     # AFTER it must be located by content, not a fixed index, from here on.
     _apply_section_5(document, context, minio)
 
-    # 6. Non-Functional Requirements - backlog task-27. A single
-    # document-wide table (not one per Epic/Story like section 5's), found
-    # by its own header text for the same reason as everything below
-    # section 5: its original index isn't stable once section 5's dynamic
-    # content has resized the document.
-    _populate_table_rows(
-        _find_table_by_header_row(document, ("NFR ID", "Category", "Requirement", "Target / SLA")), _epic_nfr_rows(epics)
-    )
+    # 6. Non-Functional Requirements - backlog task-27 (revised 2026-09-08
+    # per user direction - no ID/Category mapping into the template's fixed
+    # columns; NFRs are authored too differently across Epics for one
+    # mapping to fit all of them). Shown as pulled, per-Epic, in its own
+    # native Azure shape - same no-mapping principle as 7.2/8.1.
+    _apply_nfr_section(document, epics, minio)
 
     # 7.1/7.2 Integration Requirements - backlog task-28/41 (reimplemented
     # 2026-09-07). 7.1's text comes from run_llm_rules (generate_pipeline.py),
