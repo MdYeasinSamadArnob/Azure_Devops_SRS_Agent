@@ -848,6 +848,70 @@ def _apply_out_of_scope_section(document: Document, epics: list[dict], minio) ->
 
 
 # ---------------------------------------------------------------------------
+# 7.1/7.2 Integration Requirements (backlog task-28/41, reimplemented
+# 2026-09-07 after the original section-7 code was reverted/lost with no
+# trace in the working tree - see task-28's own notes for the full prior
+# history). Current scope, per user direction (2026-09-07):
+#   7.2 - Epic-level only, shown as pulled in its own native Azure shape
+#     (no INT-NNN IDs, no mapping into the template's fixed Intg. ID |
+#     Source System | Target System | Data Exchanged | Direction |
+#     Trigger/Freq. columns) - same per-Epic-grouped principle as
+#     3.3-3.6/6/8.1. Found as a named subsection inside the Epic's own
+#     Details-tab field (description_blocks, same technique as 3.3
+#     Dependencies/3.6 Out of Scope) via _epic_details_subsection_blocks,
+#     which already falls back to a whole DEDICATED field by label if no
+#     such subsection is found - covering the real org (Epic 118802) that
+#     instead has its own "Custom.IntegrationRequirements" field.
+#   7.1 - a brief (1-2 sentence) LLM-generated overview, grounded in the
+#     SAME per-Epic content 7.2 shows (_build_integration_grounding_text,
+#     used by generate_pipeline.py's run_llm_rules) - so it can never
+#     describe an integration 7.2 doesn't also show. Left genuinely empty
+#     if there's nothing to summarize, no LLM configured, or the call
+#     fails (same graceful-degradation convention as 2.1/3.2).
+# ---------------------------------------------------------------------------
+
+_INTEGRATION_LABEL_RE = re.compile(r"integrat", re.IGNORECASE)
+
+
+def _epic_integration_blocks(epic: dict) -> list[dict]:
+    return _epic_details_subsection_blocks(epic, _INTEGRATION_LABEL_RE)
+
+
+def _build_integration_grounding_text(epics: list[dict]) -> str:
+    """Per-Epic raw 7.2 content, flattened to plain text and joined for LLM
+    grounding (7.1's Overview prompt, built in generate_pipeline.py) - reuses
+    _epic_integration_blocks so the Overview is always describing exactly
+    what 7.2 itself shows, never a separate re-read of the source. "" if no
+    Epic has any Integration Requirements content, so the caller can skip
+    the LLM call entirely.
+    """
+    parts = []
+    for epic in epics:
+        text = blocks_to_plain_text(_epic_integration_blocks(epic))
+        if text:
+            parts.append(f"Epic - {epic.get('title') or ''}:\n{text}")
+    return "\n\n".join(parts)
+
+
+def _apply_integration_overview(document: Document, text: str | None) -> None:
+    _replace_section_body(
+        document,
+        "7.1 Integration Overview",
+        "7.2 Integration Requirements",
+        lambda scratch: scratch.add_paragraph(text or ""),
+    )
+
+
+def _apply_integration_requirements_section(document: Document, epics: list[dict], minio) -> None:
+    _replace_section_body(
+        document,
+        "7.2 Integration Requirements",
+        "8. Reporting & Output Requirements",
+        lambda scratch: _build_epic_grouped_body(scratch, epics, _epic_integration_blocks, minio),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 8.1 Reporting List (backlog task-29, revised 2026-09-07 per user
 # direction): Epic-level only - the original scope (Epic + Feature + User
 # Story, merged/deduplicated, IDed RPT-001/RPT-002...) is dropped in favor
@@ -1770,12 +1834,16 @@ def build_srs_document_v2(context: dict, minio) -> bytes:
         _find_table_by_header_row(document, ("NFR ID", "Category", "Requirement", "Target / SLA")), _epic_nfr_rows(epics)
     )
 
+    # 7.1/7.2 Integration Requirements - backlog task-28/41 (reimplemented
+    # 2026-09-07). 7.1's text comes from run_llm_rules (generate_pipeline.py),
+    # grounded in the same per-Epic content 7.2 renders natively.
+    _apply_integration_requirements_section(document, epics, minio)
+    _apply_integration_overview(document, context.get("v2_integration_overview"))
+
     # 8.1 Reporting List - backlog task-29 (revised 2026-09-07 - Epic-only,
     # native shape, no ID/column mapping; see _apply_reporting_section).
-    # Section 7 (Integration Requirements) and 8.2 ("7.2 Output List" in the
-    # template body) are untouched by this call other than 8.2 being
-    # dropped as a side effect of replacing 8.1's own body - 7 is still the
-    # template's own worked example, not yet implemented.
+    # 8.2 ("7.2 Output List" in the template body) is dropped as a side
+    # effect of replacing 8.1's own body.
     _apply_reporting_section(document, epics, minio)
 
     # 9. Requirement Traceability Matrix (RTM) stays manually maintained too

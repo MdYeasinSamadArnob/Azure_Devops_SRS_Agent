@@ -44,7 +44,7 @@ from src.db import session_scope
 from src.progress import mark_failed, report_stage
 from src.storage_helpers import upload_with_fallback
 from src.tasks.docx_builder import build_srs_document, resolve_document_title
-from src.tasks.srs_v2_builder import build_srs_document_v2
+from src.tasks.srs_v2_builder import _build_integration_grounding_text, build_srs_document_v2
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +348,7 @@ def run_llm_rules(self, context: dict[str, Any]) -> dict[str, Any]:
     context["v2_scope"] = None
     context["v2_solution_overview"] = None
     context["v2_definitions"] = None
+    context["v2_integration_overview"] = None
 
     with session_scope() as session:
         report_stage(session, job_id=generation_job_id, job_type="generate", stage="running_llm_rules")
@@ -393,6 +394,29 @@ def run_llm_rules(self, context: dict[str, Any]) -> dict[str, Any]:
                 max_tokens=400,
             )
             context["v2_definitions"] = _parse_term_definitions(definitions_response)
+
+            # 7.1 Integration Overview (backlog task-41, reimplemented
+            # 2026-09-07) - grounded in the SAME per-Epic 7.2 content
+            # srs_v2_builder.py's _apply_integration_requirements_section
+            # renders natively, via the shared _build_integration_grounding_text,
+            # so the overview can never describe an integration 7.2 doesn't
+            # also show. Skipped entirely (stays None) if no Epic has any
+            # Integration Requirements content to summarize.
+            epics_for_integration = [r for r in context["roots"] if r["work_item_type"] == "Epic"][
+                :MAX_EPICS_IN_LLM_PROMPT
+            ]
+            integration_grounding = _build_integration_grounding_text(epics_for_integration)
+            if integration_grounding:
+                context["v2_integration_overview"] = adapter.complete(
+                    "The following are Epics from a software project's Azure DevOps backlog, each with "
+                    "its own raw Integration Requirements content (unstructured prose, bullet points, or "
+                    "similar):\n\n" + integration_grounding + "\n\nWrite a VERY BRIEF (1-2 sentences) "
+                    "Integration Overview for a Software Requirements Specification document, summarizing "
+                    "the integrations described above, based ONLY on the content listed. Do not invent "
+                    "anything not implied by it. Plain sentences only, no markdown, no headings.",
+                    system=_LLM_SYSTEM_PROMPT,
+                    max_tokens=100,
+                )
         else:
             context["ai_introduction"] = adapter.complete(
                 backlog_text
@@ -473,6 +497,7 @@ def render_docx(self, context: dict[str, Any]) -> dict[str, Any]:
             context.pop("v2_scope", None)
             context.pop("v2_solution_overview", None)
             context.pop("v2_definitions", None)
+            context.pop("v2_integration_overview", None)
             return context
         except Exception as exc:  # noqa: BLE001
             logger.exception("render_docx failed for job %s", generation_job_id)
