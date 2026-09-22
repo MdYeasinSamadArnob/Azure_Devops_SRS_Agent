@@ -3,6 +3,7 @@ name: srs_agent
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -21,6 +22,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6395:6379"
@@ -35,6 +37,7 @@ services:
 
   minio:
     image: minio/minio:latest
+    restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -68,6 +71,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL}
@@ -102,6 +106,7 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
     command: ["celery", "-A", "src.celery_app", "worker", "--loglevel=INFO", "-Q", "default", "--concurrency=4"]
     env_file: .env
     environment:
@@ -133,6 +138,7 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
     command: ["celery", "-A", "src.celery_app", "worker", "--loglevel=INFO", "-Q", "document", "--concurrency=2"]
     env_file: .env
     environment:
@@ -164,6 +170,7 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
     # One LibreOffice conversion per process — a hung/heavy soffice process must
     # never be able to starve import or DOCX-rendering throughput.
     command: ["celery", "-A", "src.celery_app", "worker", "--loglevel=INFO", "-Q", "conversion", "--concurrency=1"]
@@ -207,6 +214,7 @@ services:
       API_INTERNAL_URL: ${API_INTERNAL_URL}
     ports:
       - "3010:3000"
+    restart: unless-stopped
     depends_on:
       - api
     networks: [srs_net]
