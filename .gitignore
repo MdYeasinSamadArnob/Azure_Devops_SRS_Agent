@@ -45,4 +45,17 @@ scratch/
 docs/image-compression.md
 readings/
 
+# tools/markdown_playground/render_markdown.py
 quick.txt
+
+# ARCHITECTURE.md
+test_md.md
+
+templates_backup/
+
+temp/
+
+CLAUDE.md
+backlog/
+docs/srs-content-mapping-spec.md
+tools/
