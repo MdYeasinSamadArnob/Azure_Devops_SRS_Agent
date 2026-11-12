@@ -89,6 +89,7 @@ services:
       AZURE_DEVOPS_API_VERSION: ${AZURE_DEVOPS_API_VERSION}
       LOCAL_ASSET_FALLBACK_DIR: ${LOCAL_ASSET_FALLBACK_DIR}
       API_PUBLIC_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+      LEGACY_GENERATION_EMAILS: ${LEGACY_GENERATION_EMAILS:-dev@erainfotechbd.com}
     volumes:
       - local_asset_fallback:/data/local-assets
     ports:

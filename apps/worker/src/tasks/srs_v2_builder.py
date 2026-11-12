@@ -551,6 +551,17 @@ _OUT_OF_SCOPE_LABEL_RE = re.compile(r"out.{0,8}scope", re.IGNORECASE)
 # FeatureList/BusinessRules/*Diagram/FunctionalRequirement/
 # IntegrationRequirements/NonFunctionalRequirements - none contain "report").
 _REPORTING_LABEL_RE = re.compile(r"report", re.IGNORECASE)
+# 3.2 Process Overview's diagrams. The UI headings ("Business Process
+# Diagram" on an Epic's Analysis tab, "Workflow Diagram" on a Feature's
+# Details tab) are NOT the field names - confirmed against real data
+# (snapshot of Epic 118798 / Feature 118815, 2026-11-10): the Epic's diagram
+# is its dedicated custom field Custom.WorkFlow1 (label "Work Flow1", image
+# named CNB_BPMN_...), and the Feature's is Custom.SequenceDiagram (label
+# "Sequence Diagram"). Both patterns also match the UI heading text, so a
+# named subsection inside a bigger field (the shape 3.3-3.6 deal with) is
+# still found if another org authors it that way.
+_BUSINESS_PROCESS_DIAGRAM_LABEL_RE = re.compile(r"business.{0,5}process.{0,5}diagram|work.{0,3}flow", re.IGNORECASE)
+_WORKFLOW_DIAGRAM_LABEL_RE = re.compile(r"work.{0,3}flow.{0,5}diagram|sequence.{0,3}diagram", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -845,6 +856,69 @@ def _build_epic_grouped_body(scratch: Document, epics: list[dict], get_blocks, m
         _render_blocks_tightly(scratch, blocks, minio)
     if not any_content:
         scratch.add_paragraph("[Empty]", style="List Bullet")
+
+
+def _diagram_image_blocks(blocks: list[dict]) -> list[dict]:
+    return [block for block in blocks if block.get("type") == "image"]
+
+
+def _build_process_overview_body(scratch: Document, epics: list[dict], minio) -> None:
+    """3.2 Process Overview's body: for each Epic, in selection order, its
+    own Business Process Diagram image(s), then - scoped directly under it -
+    the Workflow Diagram image(s) of each of that Epic's Features, in the
+    Features' own order, before the next Epic starts. Images only (any prose
+    sharing the same subsection is not pulled); an Epic or Feature with no
+    diagram gets no heading, but an Epic whose Features have diagrams keeps
+    its own heading as their parent. Genuinely empty when nothing is found,
+    like the manual placeholder this replaces (backlog task-21).
+    """
+    any_content = False
+    for epic in epics:
+        epic_images = _diagram_image_blocks(_epic_analysis_subsection_blocks(epic, _BUSINESS_PROCESS_DIAGRAM_LABEL_RE))
+        feature_images = [
+            (feature, images)
+            for feature in epic.get("children") or []
+            if feature.get("work_item_type") == "Feature"
+            and (images := _diagram_image_blocks(_epic_details_subsection_blocks(feature, _WORKFLOW_DIAGRAM_LABEL_RE)))
+        ]
+        if not epic_images and not feature_images:
+            continue
+
+        any_content = True
+        heading = scratch.add_paragraph()
+        heading.add_run(f"Epic - {epic.get('title') or ''}:").bold = True
+        if epic_images:
+            _render_blocks_tightly(
+                scratch,
+                epic_images,
+                minio,
+                assets=epic.get("assets"),
+                error_source_label=f"Epic {epic.get('azure_work_item_id')}: {epic.get('title') or ''}",
+            )
+        for feature, images in feature_images:
+            feature_heading = scratch.add_paragraph()
+            feature_heading.add_run(f"Feature - {feature.get('title') or ''}:").bold = True
+            _render_blocks_tightly(
+                scratch,
+                images,
+                minio,
+                assets=feature.get("assets"),
+                error_source_label=f"Feature {feature.get('azure_work_item_id')}: {feature.get('title') or ''}",
+            )
+    if not any_content:
+        scratch.add_paragraph()
+
+
+def _apply_process_overview_section(document: Document, epics: list[dict], minio) -> None:
+    """3.2 Process Overview - Epic Business Process Diagrams and their
+    Features' Workflow Diagrams, Epic-scoped (see _build_process_overview_body).
+    Replaces the template's single placeholder paragraph."""
+    _replace_section_body(
+        document,
+        "3.2 Process Overview",
+        "3.3 Dependencies with Other Modules / Systems",
+        lambda scratch: _build_process_overview_body(scratch, epics, minio),
+    )
 
 
 def _apply_dependencies_section(document: Document, epics: list[dict], minio) -> None:
@@ -1219,7 +1293,9 @@ def _apply_section_2_3_placeholders(document: Document, context: dict) -> None:
     separately in build_srs_document_v2), not index-based, since their
     per-Epic-grouped content has no fixed paragraph/table count to reserve.
     """
-    # 3.2 Process Overview - manual, always genuinely empty (backlog task-21).
+    # 3.2 Process Overview - emptied here (backlog task-21), then filled with
+    # Epic/Feature diagrams by _apply_process_overview_section, which
+    # replaces this paragraph outright (heading-anchored, not index-based).
     _set_placeholder_paragraph_text(document, PARA_3_2_PROCESS_OVERVIEW, None)
 
     # 3.1 Solution Overview - brief LLM synthesis (backlog task-17), computed
@@ -1805,6 +1881,7 @@ def build_srs_document_v2(context: dict, minio) -> bytes:
     # Run before the table captures below since none of these touch a
     # PRE-EXISTING table element, but logically belong with the rest of
     # section 2/3.
+    _apply_process_overview_section(document, epics, minio)  # 3.2 Process Overview (diagrams)
     _apply_dependencies_section(document, epics, minio)  # 3.3 Dependencies with Other Modules / Systems
     _apply_roles_section(document, epics, minio)  # 3.4 User Roles / Personas
     _apply_assumptions_section(document, epics, minio)  # 3.5 Assumptions and Constraints (Assumptions only)

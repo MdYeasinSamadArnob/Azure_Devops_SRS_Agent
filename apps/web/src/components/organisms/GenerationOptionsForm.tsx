@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/atoms/Button";
 import { Card } from "@/components/atoms/Card";
@@ -9,6 +9,10 @@ import { apiClient, ApiError } from "@/lib/api-client";
 
 interface GenerateResponse {
   job_id: string;
+}
+
+interface CurrentUser {
+  can_use_legacy_generation: boolean;
 }
 
 const FORMAT_OPTIONS = [
@@ -77,6 +81,17 @@ export function GenerationOptionsForm({
   const [submitting, setSubmitting] = useState<TemplateVersion | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isSealed = snapshotStatus === "sealed";
+  // Server-decided (LEGACY_GENERATION_EMAILS) - the API also rejects
+  // template_version "legacy" for anyone else, so this only controls
+  // whether the button is shown.
+  const [canUseLegacy, setCanUseLegacy] = useState(false);
+
+  useEffect(() => {
+    apiClient
+      .get<CurrentUser>("/auth/me")
+      .then((user) => setCanUseLegacy(user.can_use_legacy_generation))
+      .catch(() => setCanUseLegacy(false));
+  }, []);
 
   async function handleSubmit(templateVersion: TemplateVersion) {
     setSubmitting(templateVersion);
@@ -241,15 +256,18 @@ export function GenerationOptionsForm({
           </p>
         )}
         <div className="space-y-2">
-          {/* The "Generate Document" (legacy) button is hidden, not removed
-              from the codebase - handleSubmit("legacy") and the "legacy"
-              template_version path (API + worker) are untouched, so it can
-              be brought back by re-adding the button below if needed:
-              <Button type="button" onClick={() => handleSubmit("legacy")}
-                disabled={!isSealed || submitting !== null || (!formats.docx && !formats.pdf)}
-                className="w-full">
-                {submitting === "legacy" ? "Starting generation…" : "Generate Document"}
-              </Button> */}
+          {/* The "Generate Document" (legacy) button is only shown to
+              accounts the API reports as can_use_legacy_generation. */}
+          {canUseLegacy && (
+            <Button
+              type="button"
+              onClick={() => handleSubmit("legacy")}
+              disabled={!isSealed || submitting !== null || (!formats.docx && !formats.pdf)}
+              className="w-full"
+            >
+              {submitting === "legacy" ? "Starting generation…" : "Generate Document"}
+            </Button>
+          )}
           <Button
             type="button"
             onClick={() => handleSubmit("v2")}

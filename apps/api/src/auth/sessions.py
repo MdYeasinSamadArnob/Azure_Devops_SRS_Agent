@@ -13,6 +13,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import get_settings
 from src.database.models import User, UserSession
 from src.database.session import get_db_session
 
@@ -52,3 +53,7 @@ async def require_user(user: User | None = Depends(get_current_user)) -> User:
     if user is None:
         raise HTTPException(status_code=401, detail="not authenticated")
     return user
+
+
+def can_use_legacy_generation(user: User) -> bool:
+    return user.email.lower() in get_settings().legacy_generation_email_set

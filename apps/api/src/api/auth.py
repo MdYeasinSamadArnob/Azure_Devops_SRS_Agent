@@ -10,7 +10,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from srs_core.auth.passwords import verify_password
 
-from src.auth.sessions import SESSION_COOKIE_NAME, SESSION_TTL_DAYS, create_session, require_user
+from src.auth.sessions import (
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_DAYS,
+    can_use_legacy_generation,
+    create_session,
+    require_user,
+)
 from src.database.models import User, UserSession
 from src.database.session import get_db_session
 
@@ -25,6 +31,15 @@ class LoginRequest(BaseModel):
 class UserResponse(BaseModel):
     email: str
     is_superuser: bool
+    can_use_legacy_generation: bool
+
+    @classmethod
+    def from_user(cls, user: User) -> "UserResponse":
+        return cls(
+            email=user.email,
+            is_superuser=user.is_superuser,
+            can_use_legacy_generation=can_use_legacy_generation(user),
+        )
 
 
 @router.post("/login", response_model=UserResponse)
@@ -48,7 +63,7 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
         secure=False,  # dev runs over plain http; flip to True once served over https
         path="/",
     )
-    return UserResponse(email=user.email, is_superuser=user.is_superuser)
+    return UserResponse.from_user(user)
 
 
 @router.post("/logout")
@@ -68,4 +83,4 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
 
 @router.get("/me", response_model=UserResponse)
 async def me(user: User = Depends(require_user)) -> UserResponse:
-    return UserResponse(email=user.email, is_superuser=user.is_superuser)
+    return UserResponse.from_user(user)

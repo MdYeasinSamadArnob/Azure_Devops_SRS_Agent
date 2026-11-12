@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.auth.sessions import require_user
+from src.auth.sessions import can_use_legacy_generation, require_user
 from src.database.models import GenerationJob, SourceSnapshot, User
 from src.database.session import get_db_session
 from src.jobs.celery_bridge import enqueue_generate_pipeline
@@ -69,6 +69,8 @@ async def trigger_generation(
 ) -> GenerateResponse:
     if not body.formats or not set(body.formats).issubset({"docx", "pdf"}):
         raise HTTPException(status_code=422, detail="formats must be a non-empty subset of ['docx', 'pdf']")
+    if body.template_version == "legacy" and not can_use_legacy_generation(current_user):
+        raise HTTPException(status_code=403, detail="legacy generation is not enabled for this account")
 
     # Downstream (job.params JSON column, Celery task args) all expect a
     # plain JSON-serializable dict, not a Pydantic model - and exclude_none

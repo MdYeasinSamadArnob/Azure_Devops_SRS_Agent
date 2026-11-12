@@ -16,10 +16,13 @@ const jakarta = Plus_Jakarta_Sans({
   weight: ["400", "500", "600", "700"],
 });
 
+// No explicit `weight`: JetBrains Mono is a variable font, and listing
+// weights makes Google return several @font-face rules sharing one file,
+// which Next 16.3.0's Turbopack rejects ("next/font/google queries have
+// exactly one entry"). The variable font covers every weight anyway.
 const jetbrainsMono = JetBrains_Mono({
   variable: "--font-jetbrains-mono",
   subsets: ["latin"],
-  weight: ["400", "500"],
 });
 
 export const metadata: Metadata = {

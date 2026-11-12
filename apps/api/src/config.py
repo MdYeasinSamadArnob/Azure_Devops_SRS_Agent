@@ -31,9 +31,17 @@ class Settings(BaseSettings):
     # without needing this set at all for the common case.
     api_public_base_url: str | None = None
 
+    # Comma-separated emails allowed to run the legacy ("Generate Document")
+    # pipeline. Everyone else is limited to template_version "v2".
+    legacy_generation_emails: str = "dev@erainfotechbd.com"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def legacy_generation_email_set(self) -> set[str]:
+        return {email.strip().lower() for email in self.legacy_generation_emails.split(",") if email.strip()}
 
 
 @lru_cache
